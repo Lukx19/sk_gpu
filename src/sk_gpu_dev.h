@@ -37,6 +37,8 @@ sk_gpu.h
 #define SKG_DIRECT3D11
 #elif defined( SKG_FORCE_OPENGL )
 #define SKG_OPENGL
+#elif defined( SKG_FORCE_VULKAN )
+#define SKG_VULKAN
 #elif defined( _WIN32 )
 #define SKG_DIRECT3D11
 #else

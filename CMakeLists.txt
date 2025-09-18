@@ -8,6 +8,9 @@ project(sk_gpu VERSION 0.1
 option(SK_BUILD_SHADERC  "Build the shader compiler" ON)
 option(SK_BUILD_EDITOR   "Build the shader editor" ON)
 option(SK_BUILD_EXAMPLES "Build the examples" ON)
+option(SK_BUILD_TESTS    "Build the tests" ON)
+
+enable_testing()
 
 add_subdirectory(src)
 if (SK_BUILD_SHADERC)
@@ -18,4 +21,7 @@ if (SK_BUILD_EDITOR)
 endif()
 if (SK_BUILD_EXAMPLES)
     add_subdirectory(examples/sk_gpu_flat)
+endif()
+if (SK_BUILD_TESTS)
+    add_subdirectory(tests)
 endif()

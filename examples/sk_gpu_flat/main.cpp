@@ -4,7 +4,10 @@
 #include <windows.h>
 #elif defined(__linux__)
 #include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#if defined(SKGPU_TEST_USE_GL)
 #include <GL/glx.h>
+#endif
 Display *x_dpy;
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten.h>
@@ -145,9 +148,10 @@ bool main_init() {
 	app_resize_width  = bounds.right  - bounds.left;
 	app_resize_height = bounds.bottom - bounds.top;
 #elif defined(__linux__)
-	x_dpy = XOpenDisplay(0);
+	x_dpy = XOpenDisplay(nullptr);
 	if (x_dpy == nullptr) return false;
 
+#if defined(SKGPU_TEST_USE_GL)
 	GLint fb_att[] = {
 		GLX_DOUBLEBUFFER,  true,
 		GLX_RED_SIZE,      8,
@@ -163,8 +167,9 @@ bool main_init() {
 
 	Window       x_root         = DefaultRootWindow(x_dpy);
 	int          fbConfigNumber = 0;
-	GLXFBConfig *x_fb_config    = glXChooseFBConfig       (x_dpy, 0, fb_att, &fbConfigNumber);
-	XVisualInfo *x_vi           = glXGetVisualFromFBConfig(x_dpy, *x_fb_config);
+	GLXFBConfig *x_fb_config    = glXChooseFBConfig(x_dpy, 0, fb_att, &fbConfigNumber);
+	if (x_fb_config == nullptr) return false;
+	XVisualInfo *x_vi = glXGetVisualFromFBConfig(x_dpy, *x_fb_config);
 	if (x_vi == nullptr) return false;
 
 	Colormap             x_cmap = XCreateColormap(x_dpy, x_root, x_vi->visual, AllocNone);
@@ -172,7 +177,7 @@ bool main_init() {
 	x_swa.colormap              = x_cmap;
 	x_swa.event_mask            = ExposureMask | KeyPressMask;
 
-	Window x_win = XCreateWindow(x_dpy, x_root, 0, 0, 1280, 720, 0, x_vi->depth, InputOutput, x_vi->visual, CWColormap | CWEventMask, &x_swa);
+	Window x_win = XCreateWindow(x_dpy, x_root, 0, 0, app_resize_width, app_resize_height, 0, x_vi->depth, InputOutput, x_vi->visual, CWColormap | CWEventMask, &x_swa);
 
 	XSizeHints *hints = XAllocSizeHints();
 	if (hints != nullptr) {
@@ -188,6 +193,32 @@ bool main_init() {
 
 	skg_setup_xlib(x_dpy, x_vi, x_fb_config, &x_win);
 	app_hwnd = (void *)x_win;
+#else
+	int    screen = DefaultScreen(x_dpy);
+	Window x_root = RootWindow(x_dpy, screen);
+
+	XSetWindowAttributes x_swa = {};
+	x_swa.colormap   = DefaultColormap(x_dpy, screen);
+	x_swa.event_mask = ExposureMask | KeyPressMask;
+
+	Window x_win = XCreateWindow(x_dpy, x_root, 0, 0, app_resize_width, app_resize_height, 0,
+	        DefaultDepth(x_dpy, screen), InputOutput, DefaultVisual(x_dpy, screen),
+	        CWColormap | CWEventMask, &x_swa);
+
+	XSizeHints *hints = XAllocSizeHints();
+	if (hints != nullptr) {
+		hints->flags      = PMinSize;
+		hints->min_width  = 100;
+		hints->min_height = 100;
+		XSetWMNormalHints(x_dpy, x_win, hints);
+		XSetWMSizeHints  (x_dpy, x_win, hints, PMinSize);
+	}
+
+	XMapWindow(x_dpy, x_win);
+	XStoreName(x_dpy, x_win, app_name);
+
+	app_hwnd = (void *)x_win;
+#endif
 #endif
 
 	skg_callback_log([](skg_log_ level, const char *text) { 

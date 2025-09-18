@@ -9,7 +9,7 @@ set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
 find_package(X11 REQUIRED)
 
 if (NOT DEFINED SKGPU_TEST_USE_GL)
-    if (UNIX)
+    if (EMSCRIPTEN)
         set(SKGPU_TEST_USE_GL ON)
     else()
         set(SKGPU_TEST_USE_GL OFF)
@@ -31,7 +31,9 @@ add_executable(skg_flatscreen
     ../../src/sk_gpu_dx11.h
     ../../src/sk_gpu_dx11.cpp
     ../../src/sk_gpu_gl.h
-    ../../src/sk_gpu_gl.cpp )
+    ../../src/sk_gpu_gl.cpp
+    ../../src/sk_gpu_vk.h
+    ../../src/sk_gpu_vk.cpp )
 
 target_include_directories(skg_flatscreen PRIVATE
     ../common
@@ -39,25 +41,32 @@ target_include_directories(skg_flatscreen PRIVATE
 
 ## Compile shaders
 
-skshaderc_compile_headers(skg_flatscreen
-    ${CMAKE_BINARY_DIR}/shaders_test/
-    "-e -t xge" SKGPU_TEST_SHADERS_H
-    ../common/compute_test.hlsl
-    ../common/cubemap.hlsl
-    ../common/test.hlsl)
+if (COMMAND skshaderc_compile_headers)
+    skshaderc_compile_headers(skg_flatscreen
+        ${CMAKE_BINARY_DIR}/shaders_test/
+        "-e -t xge" SKGPU_TEST_SHADERS_H
+        ../common/compute_test.hlsl
+        ../common/cubemap.hlsl
+        ../common/test.hlsl)
+endif()
+
+set(SKGPU_EXAMPLE_LIBS ${X11_LIBRARIES})
 
 if (SKGPU_TEST_USE_GL)
+    target_compile_definitions(skg_flatscreen PRIVATE SKGPU_TEST_USE_GL=1 SKG_FORCE_OPENGL)
     if (UNIX)
-        set( GL_LIBRARIES
-            ${X11_LIBRARIES}
+        list(APPEND SKGPU_EXAMPLE_LIBS
             dl
             GL
             GLX)
-    elseif(WIN32)
-        target_compile_definitions(skg_flatscreen PUBLIC SKG_FORCE_OPENGL)
     endif()
+else()
+    target_compile_definitions(skg_flatscreen PRIVATE SKG_FORCE_VULKAN)
+    find_package(Vulkan REQUIRED)
+    list(APPEND SKGPU_EXAMPLE_LIBS Vulkan::Vulkan)
 endif()
 
-target_link_libraries(skg_flatscreen
-    ${GL_LIBRARIES})
+target_link_libraries(skg_flatscreen PRIVATE
+    ${SKGPU_EXAMPLE_LIBS})
+
 add_dependencies(skg_flatscreen sk_gpu_header)
