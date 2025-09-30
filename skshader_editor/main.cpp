@@ -28,7 +28,7 @@ int main(int, char**) {
 	skg_callback_log([](skg_log_ level, const char *text) { 
 		printf("[%d] %s\n", level, text); 
 	});
-	if (!skg_init("skg_imgui", nullptr)) {
+        if (!skg_init("skg_imgui", hwnd, nullptr)) {
 		::UnregisterClass(wc.lpszClassName, wc.hInstance);
 		return 1;
 	}

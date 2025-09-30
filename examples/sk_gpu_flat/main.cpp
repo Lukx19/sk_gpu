@@ -9,6 +9,11 @@
 #include <GL/glx.h>
 #endif
 Display *x_dpy;
+struct skg_linux_native_window_t {
+        Display *display;
+        Window   window;
+};
+static skg_linux_native_window_t app_xlib_window = {};
 #elif defined(__EMSCRIPTEN__)
 #include <emscripten.h>
 #include <emscripten/html5.h>
@@ -107,6 +112,7 @@ void resize_swapchain(int width, int height) {
 ///////////////////////////////////////////
 
 bool main_init() {
+        void *init_hwnd = nullptr;
 #if defined(_WIN32)
 	WNDCLASS wc = {}; 
 	wc.lpfnWndProc = [](HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -147,6 +153,7 @@ bool main_init() {
 	GetClientRect((HWND)app_hwnd, &bounds);
 	app_resize_width  = bounds.right  - bounds.left;
 	app_resize_height = bounds.bottom - bounds.top;
+	init_hwnd = app_hwnd;
 #elif defined(__linux__)
 	x_dpy = XOpenDisplay(nullptr);
 	if (x_dpy == nullptr) return false;
@@ -193,6 +200,9 @@ bool main_init() {
 
 	skg_setup_xlib(x_dpy, x_vi, x_fb_config, &x_win);
 	app_hwnd = (void *)x_win;
+	app_xlib_window.display = x_dpy;
+	app_xlib_window.window  = x_win;
+	init_hwnd = &app_xlib_window;
 #else
 	int    screen = DefaultScreen(x_dpy);
 	Window x_root = RootWindow(x_dpy, screen);
@@ -218,8 +228,13 @@ bool main_init() {
 	XStoreName(x_dpy, x_win, app_name);
 
 	app_hwnd = (void *)x_win;
+	app_xlib_window.display = x_dpy;
+	app_xlib_window.window  = x_win;
+	init_hwnd = &app_xlib_window;
 #endif
 #endif
+	if (init_hwnd == nullptr)
+		init_hwnd = app_hwnd;
 
 	skg_callback_log([](skg_log_ level, const char *text) { 
 		if (level == 2) {
@@ -228,7 +243,7 @@ bool main_init() {
 			printf("[%d] %s\n", level, text);
 		}
 	});
-	if (skg_init(app_name, nullptr) <= 0)
+	if (skg_init(app_name, init_hwnd, nullptr) <= 0)
 		return false;
 	app_swapchain = skg_swapchain_create(app_hwnd, skg_tex_fmt_rgba32_linear, skg_tex_fmt_depth32, app_resize_width, app_resize_height);
 	resize_swapchain(app_resize_width, app_resize_height);

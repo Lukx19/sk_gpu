@@ -59,7 +59,8 @@ void skg_downsample_4(T *data, T data_max, int32_t width, int32_t height, T **ou
 
 ///////////////////////////////////////////
 
-int32_t skg_init(const char *, void *adapter_id) {
+int32_t skg_init(const char *, void *app_hwnd, void *adapter_id) {
+        (void)app_hwnd;
 	UINT creation_flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #if defined(_DEBUG)
 	creation_flags |= D3D11_CREATE_DEVICE_DEBUG;

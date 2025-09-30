@@ -244,7 +244,7 @@ bool run_all_tests() {
 } // namespace
 
 int main() {
-    if (!skg_init("sk_gpu_api_test", nullptr)) {
+    if (!skg_init("sk_gpu_api_test", nullptr, nullptr)) {
         std::fprintf(stderr, "skg_init failed. Ensure an OpenGL context is available.\n");
         return EXIT_FAILURE;
     }
