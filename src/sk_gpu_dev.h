@@ -496,6 +496,9 @@ SKG_API skg_tex_t           skg_tex_create_from_existing (void *native_tex, skg_
 SKG_API skg_tex_t           skg_tex_create_from_layer    (void *native_tex, skg_tex_type_ type, skg_tex_fmt_ format, int32_t width, int32_t height, int32_t array_layer);
 SKG_API skg_tex_t           skg_tex_create               (skg_tex_type_ type, skg_use_ use, skg_tex_fmt_ format, skg_mip_ mip_maps);
 SKG_API void                skg_tex_name                 (      skg_tex_t *tex, const char* name);
+#if defined(SKG_VULKAN)
+SKG_API skg_tex_t*          skg_tex_find                 (const char *name);
+#endif
 SKG_API bool                skg_tex_is_valid             (const skg_tex_t *tex);
 SKG_API void                skg_tex_copy_to              (const skg_tex_t *tex, int32_t tex_surface, skg_tex_t *destination, int32_t dest_surface);
 SKG_API void                skg_tex_copy_to_swapchain    (const skg_tex_t *tex, skg_swapchain_t *destination);

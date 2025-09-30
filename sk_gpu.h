@@ -522,6 +522,9 @@ typedef struct skg_platform_data_t {
 #endif
 #include <windows.h>
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif defined(__linux__)
+#include <X11/Xlib.h>
+#define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include <vulkan/vulkan.h>
@@ -891,6 +894,9 @@ SKG_API skg_tex_t           skg_tex_create_from_existing (void *native_tex, skg_
 SKG_API skg_tex_t           skg_tex_create_from_layer    (void *native_tex, skg_tex_type_ type, skg_tex_fmt_ format, int32_t width, int32_t height, int32_t array_layer);
 SKG_API skg_tex_t           skg_tex_create               (skg_tex_type_ type, skg_use_ use, skg_tex_fmt_ format, skg_mip_ mip_maps);
 SKG_API void                skg_tex_name                 (      skg_tex_t *tex, const char* name);
+#if defined(SKG_VULKAN)
+SKG_API skg_tex_t*          skg_tex_find                 (const char *name);
+#endif
 SKG_API bool                skg_tex_is_valid             (const skg_tex_t *tex);
 SKG_API void                skg_tex_copy_to              (const skg_tex_t *tex, int32_t tex_surface, skg_tex_t *destination, int32_t dest_surface);
 SKG_API void                skg_tex_copy_to_swapchain    (const skg_tex_t *tex, skg_swapchain_t *destination);
@@ -3400,6 +3406,9 @@ DXGI_FORMAT skg_ind_to_dxgi(skg_ind_fmt_ format) {
 #endif
 #include <windows.h>
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif defined(__linux__)
+#include <X11/Xlib.h>
+#define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include <vulkan/vulkan.h>
@@ -3497,6 +3506,62 @@ struct vk_pipeline_t {
 };
 array_t<vk_renderpass_t> vk_renderpass_cache = {};
 array_t<vk_pipeline_t>   vk_pipeline_cache   = {};
+
+struct vk_named_texture_t {
+        skg_tex_t *tex;
+        char      *name;
+};
+array_t<vk_named_texture_t> vk_named_textures = {};
+
+static int32_t vk_named_texture_find_tex(const skg_tex_t *tex) {
+        for (size_t i = 0; i < vk_named_textures.count; i++)
+                if (vk_named_textures[i].tex == tex)
+                        return (int32_t)i;
+        return -1;
+}
+
+static int32_t vk_named_texture_find_name(const char *name) {
+        if (name == nullptr)
+                return -1;
+
+        for (size_t i = 0; i < vk_named_textures.count; i++)
+                if (vk_named_textures[i].name != nullptr && strcmp(vk_named_textures[i].name, name) == 0)
+                        return (int32_t)i;
+        return -1;
+}
+
+static void vk_named_texture_remove_index(size_t index) {
+        if (index >= vk_named_textures.count)
+                return;
+
+        if (vk_named_textures[index].name != nullptr) {
+                free(vk_named_textures[index].name);
+                vk_named_textures[index].name = nullptr;
+        }
+        vk_named_textures.remove(index);
+}
+
+static void vk_named_texture_unregister(const skg_tex_t *tex) {
+        int32_t index = vk_named_texture_find_tex(tex);
+        if (index >= 0)
+                vk_named_texture_remove_index((size_t)index);
+}
+
+static void vk_named_texture_unregister_name(const char *name) {
+        int32_t index = vk_named_texture_find_name(name);
+        if (index >= 0)
+                vk_named_texture_remove_index((size_t)index);
+}
+
+static void vk_named_texture_clear() {
+        for (size_t i = 0; i < vk_named_textures.count; i++) {
+                if (vk_named_textures[i].name != nullptr) {
+                        free(vk_named_textures[i].name);
+                        vk_named_textures[i].name = nullptr;
+                }
+        }
+        vk_named_textures.free();
+}
 
 //////////////////////////////////////
 // Pipelines                        //
@@ -3778,12 +3843,36 @@ bool vk_create_instance(const char *app_name, VkInstance *out_inst) {
 bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device) {
 	*out_device = {};
 
-	// Create win32 surface
+#if defined(_WIN32)
 	VkWin32SurfaceCreateInfoKHR surface_info = { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
 	surface_info.hinstance = GetModuleHandle(0);
 	surface_info.hwnd      = (HWND)app_hwnd;
 	if (vkCreateWin32SurfaceKHR(inst, &surface_info, nullptr, &out_device->surface) != VK_SUCCESS)
 		return false;
+#elif defined(__linux__)
+	struct skg_linux_native_window_t {
+		Display *display;
+		Window   window;
+	};
+
+	Display *display = nullptr;
+	Window   window  = 0;
+	if (app_hwnd != nullptr) {
+		const skg_linux_native_window_t *native = (const skg_linux_native_window_t *)app_hwnd;
+		display = native->display;
+		window  = native->window;
+	}
+	if (display == nullptr || window == 0)
+		return false;
+
+	VkXlibSurfaceCreateInfoKHR surface_info = { VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR };
+	surface_info.dpy    = display;
+	surface_info.window = window;
+	if (vkCreateXlibSurfaceKHR(inst, &surface_info, nullptr, &out_device->surface) != VK_SUCCESS)
+		return false;
+#else
+	(void)app_hwnd;
+#endif
 
 	// Get physical device list
 	uint32_t          device_count;
@@ -4191,6 +4280,8 @@ void skg_shutdown() {
                 free(vk_adapter_name);
                 vk_adapter_name = nullptr;
         }
+
+        vk_named_texture_clear();
 }
 
 ///////////////////////////////////////////
@@ -5531,7 +5622,7 @@ static bool vk_swapchain_init_textures(skg_swapchain_t *swapchain) {
 
         for (uint32_t i = 0; i < swapchain->img_count; i++) {
                 swapchain->textures[i] = skg_tex_create_from_existing(&swapchain->imgs[i], skg_tex_type_rendertarget,
-                        skg_native_to_tex_fmt(swapchain->format.format), swapchain->width, swapchain->height, 1, 1, 1);
+                        swapchain->color_format, swapchain->width, swapchain->height, 1, 1, 1);
                 if (vkCreateFence(skg_device.device, &fence_info, nullptr, &swapchain->img_fence[i]) != VK_SUCCESS) {
                         skg_log(skg_log_critical, "failed to create swapchain fence");
                         return false;
@@ -5553,6 +5644,11 @@ skg_swapchain_t skg_swapchain_create(void *hwnd, skg_tex_fmt_ format, skg_tex_fm
         (void)hwnd;
 
         result.color_format = skg_native_to_tex_fmt(result.format.format);
+        switch (result.color_format) {
+        case skg_tex_fmt_rgba32_linear: result.color_format = skg_tex_fmt_rgba32; break;
+        case skg_tex_fmt_bgra32_linear: result.color_format = skg_tex_fmt_bgra32; break;
+        default: break;
+        }
         result.depth_format = depth_format;
 
         VkSurfaceCapabilitiesKHR surface_caps;
@@ -5739,13 +5835,13 @@ void skg_swapchain_bind(skg_swapchain_t *swapchain) {
 const skg_tex_t *skg_swapchain_get_target(const skg_swapchain_t *swapchain) {
         if (swapchain == nullptr || swapchain->textures == nullptr)
                 return nullptr;
-        uint32_t index = swapchain->img_curr < swapchain->img_count ? swapchain->img_curr : 0;
+        uint32_t index = swapchain->img_active < swapchain->img_count ? swapchain->img_active : 0;
         return &swapchain->textures[index];
 }
 const skg_tex_t *skg_swapchain_get_depth(const skg_swapchain_t *swapchain) {
         if (swapchain == nullptr || swapchain->depths == nullptr)
                 return nullptr;
-        uint32_t index = swapchain->img_curr < swapchain->img_count ? swapchain->img_curr : 0;
+        uint32_t index = swapchain->img_active < swapchain->img_count ? swapchain->img_active : 0;
         return &swapchain->depths[index];
 }
 
@@ -6249,6 +6345,35 @@ skg_tex_t            skg_tex_create(skg_tex_type_ type, skg_use_ use, skg_tex_fm
         result.rt_renderpass = -1;
         result.layout = VK_IMAGE_LAYOUT_UNDEFINED;
         return result;
+}
+void skg_tex_name(skg_tex_t *tex, const char* name) {
+        if (tex == nullptr)
+                return;
+
+        vk_named_texture_unregister(tex);
+
+        if (name == nullptr || name[0] == '\0')
+                return;
+
+        vk_named_texture_unregister_name(name);
+
+        size_t name_len = strlen(name);
+        char  *name_copy = (char *)malloc(name_len + 1);
+        if (name_copy == nullptr) {
+                skg_log(skg_log_warning, "Failed to allocate storage for texture name");
+                return;
+        }
+
+        memcpy(name_copy, name, name_len + 1);
+
+        vk_named_texture_t entry = {};
+        entry.tex  = tex;
+        entry.name = name_copy;
+        vk_named_textures.add(entry);
+}
+skg_tex_t *skg_tex_find(const char *name) {
+        int32_t index = vk_named_texture_find_name(name);
+        return index >= 0 ? vk_named_textures[index].tex : nullptr;
 }
 void skg_tex_settings(skg_tex_t *tex, skg_tex_address_ address, skg_tex_sample_ sample, skg_sample_compare_ compare, int32_t anisotropy) {
         if (tex == nullptr)
@@ -6974,15 +7099,19 @@ void skg_tex_bind(const skg_tex_t *tex, skg_bind_t bind) {
 ///////////////////////////////////////////
 
 void skg_tex_destroy(skg_tex_t *tex) {
+        vk_named_texture_unregister(tex);
+
         if (tex->rt_framebuffer) vkDestroyFramebuffer(skg_device.device, tex->rt_framebuffer, nullptr);
         if (tex->rt_renderpass ) vk_renderpass_release(tex->rt_renderpass);
         if (tex->rt_commandbuffer != VK_NULL_HANDLE)
                 vkFreeCommandBuffers(skg_device.device, vk_cmd_pool, 1, &tex->rt_commandbuffer);
 
-        if (tex->view)        vkDestroyImageView  (skg_device.device, tex->view,        nullptr);
-        if (tex->sampler)     vkDestroySampler    (skg_device.device, tex->sampler,     nullptr);
-        if (tex->texture)     vkDestroyImage      (skg_device.device, tex->texture,     nullptr);
-        if (tex->texture_mem) vkFreeMemory        (skg_device.device, tex->texture_mem, nullptr);
+        if (tex->view)    vkDestroyImageView  (skg_device.device, tex->view,    nullptr);
+        if (tex->sampler) vkDestroySampler    (skg_device.device, tex->sampler, nullptr);
+        if (tex->texture_mem != VK_NULL_HANDLE) {
+                if (tex->texture) vkDestroyImage(skg_device.device, tex->texture, nullptr);
+                vkFreeMemory(skg_device.device, tex->texture_mem, nullptr);
+        }
         *tex = {};
 }
 
