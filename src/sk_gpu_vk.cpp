@@ -286,9 +286,11 @@ static VkSampler      vk_dummy_sampler        = VK_NULL_HANDLE;
 static VkDescriptorImageInfo vk_dummy_texture_info = {};
 static VkDescriptorImageInfo vk_dummy_storage_image_info = {};
 
-static void vk_mark_descriptor_dirty() {
-        vk_descriptor_dirty_graphics = true;
-        vk_descriptor_dirty_compute  = true;
+static void vk_mark_descriptor_dirty(uint32_t stage_bits) {
+        if (stage_bits & (skg_stage_vertex | skg_stage_pixel))
+                vk_descriptor_dirty_graphics = true;
+        if (stage_bits & skg_stage_compute)
+                vk_descriptor_dirty_compute  = true;
 }
 
 static void vk_bind_descriptor_set(VkCommandBuffer cmd, VkPipelineBindPoint bind_point, VkPipelineLayout layout) {
@@ -311,6 +313,18 @@ static void vk_flush_descriptor_binding_graphics() {
 
         vk_bind_descriptor_set(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vk_active_graphics_pipeline_layout);
         vk_descriptor_dirty_graphics = false;
+}
+
+static void vk_flush_descriptor_binding_compute(VkCommandBuffer cmd) {
+        if (!vk_descriptor_dirty_compute)
+                return;
+        if (cmd == VK_NULL_HANDLE)
+                return;
+        if (vk_active_compute_pipeline_layout == VK_NULL_HANDLE)
+                return;
+
+        vk_bind_descriptor_set(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vk_active_compute_pipeline_layout);
+        vk_descriptor_dirty_compute = false;
 }
 
 skg_tex_fmt_ skg_native_to_tex_fmt(VkFormat format);
@@ -1064,8 +1078,7 @@ void skg_compute(uint32_t thread_count_x, uint32_t thread_count_y, uint32_t thre
         }
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vk_active_compute_pipeline);
-        vk_bind_descriptor_set(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vk_active_compute_pipeline_layout);
-        vk_descriptor_dirty_compute = false;
+        vk_flush_descriptor_binding_compute(cmd);
         vkCmdDispatch(cmd, thread_count_x, thread_count_y, thread_count_z);
 
         vkEndCommandBuffer(cmd);
@@ -1416,7 +1429,7 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 write.descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
                 write.pBufferInfo     = &buffer->descriptor_uniform;
                 vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-                vk_mark_descriptor_dirty();
+                vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
         } break;
@@ -1436,7 +1449,7 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 write.pBufferInfo     = &buffer->descriptor_storage;
                 vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-                vk_mark_descriptor_dirty();
+                vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
         } break;
@@ -1456,7 +1469,7 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 write.pBufferInfo     = &buffer->descriptor_storage;
                 vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-                vk_mark_descriptor_dirty();
+                vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
         } break;
@@ -1497,7 +1510,7 @@ void skg_buffer_clear(skg_bind_t bind) {
         write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.pBufferInfo     = &vk_dummy_storage_info;
         vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-        vk_mark_descriptor_dirty();
+        vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
 }
@@ -3471,7 +3484,7 @@ void skg_tex_clear(skg_bind_t bind) {
         }
 
         vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-        vk_mark_descriptor_dirty();
+        vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
 }
@@ -3543,7 +3556,7 @@ void skg_tex_bind(const skg_tex_t *tex, skg_bind_t bind) {
 
         write.pImageInfo = image_ptr;
         vkUpdateDescriptorSets(skg_device.device, 1, &write, 0, nullptr);
-        vk_mark_descriptor_dirty();
+        vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
 }
