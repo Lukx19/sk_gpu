@@ -559,6 +559,7 @@ typedef struct skg_shader_t {
         VkShaderModule     _compute;
         VkPipeline         compute_pipeline;
         VkPipelineLayout   compute_layout;
+        char              *debug_name;
 } skg_shader_t;
 
 typedef struct skg_pipeline_t {
@@ -578,6 +579,7 @@ typedef struct skg_pipeline_t {
 
         int64_t                pipeline;
         VkPipelineLayout       pipeline_layout;
+        char                  *debug_name;
 } skg_pipeline_t;
 
 typedef struct skg_tex_t {
@@ -3417,7 +3419,28 @@ DXGI_FORMAT skg_ind_to_dxgi(skg_ind_fmt_ format) {
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(__linux__)
+static Display *vk_cached_display     = nullptr;
+static void    *vk_cached_visual_info = nullptr;
+static void    *vk_cached_fbconfig    = nullptr;
+static Window   vk_cached_window      = 0;
+#endif
+
+static bool vk_debug_utils_instance_enabled = false;
+static bool vk_debug_utils_naming_enabled   = false;
+static bool vk_debug_utils_labels_enabled   = false;
+static PFN_vkSetDebugUtilsObjectNameEXT vkSetDebugUtilsObjectNameEXT_fn = nullptr;
+static PFN_vkCmdBeginDebugUtilsLabelEXT vkCmdBeginDebugUtilsLabelEXT_fn = nullptr;
+static PFN_vkCmdEndDebugUtilsLabelEXT   vkCmdEndDebugUtilsLabelEXT_fn   = nullptr;
+
 ///////////////////////////////////////////
+
+#if defined(__linux__)
+struct skg_linux_native_window_t {
+        Display *display;
+        Window   window;
+};
+#endif
 
 template <typename T> struct array_t {
 	T     *data;
@@ -3445,12 +3468,56 @@ template <typename T> struct array_t {
 };
 
 uint64_t hash_fnv64_data(const void *data, size_t data_size, uint64_t start_hash = 14695981039346656037) {
-	uint64_t hash = start_hash;
-	uint8_t *bytes = (uint8_t *)data;
-	for (size_t i = 0; i < data_size; i++)
-		hash = (hash ^ bytes[i]) * 1099511628211;
-	return hash;
+        uint64_t hash = start_hash;
+        uint8_t *bytes = (uint8_t *)data;
+        for (size_t i = 0; i < data_size; i++)
+                hash = (hash ^ bytes[i]) * 1099511628211;
+        return hash;
 }
+
+static bool vk_extension_supported(const VkExtensionProperties *props, uint32_t count, const char *name) {
+        if (props == nullptr || name == nullptr)
+                return false;
+        for (uint32_t i = 0; i < count; i++)
+                if (strcmp(props[i].extensionName, name) == 0)
+                        return true;
+        return false;
+}
+
+static void vk_assign_debug_name(char **dst, const char *name) {
+        if (dst == nullptr)
+                return;
+        if (*dst != nullptr) {
+                free(*dst);
+                *dst = nullptr;
+        }
+        if (name == nullptr || name[0] == '\0')
+                return;
+
+        size_t len = strlen(name);
+        char  *copy = (char *)malloc(len + 1);
+        if (copy == nullptr)
+                return;
+
+        memcpy(copy, name, len + 1);
+        *dst = copy;
+}
+
+static void vk_set_debug_name(VkObjectType type, uint64_t handle, const char *name) {
+        if (!vk_debug_utils_naming_enabled || vkSetDebugUtilsObjectNameEXT_fn == nullptr)
+                return;
+        if (handle == 0 || name == nullptr || name[0] == '\0')
+                return;
+
+        VkDebugUtilsObjectNameInfoEXT info = { VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT };
+        info.objectType   = type;
+        info.objectHandle = handle;
+        info.pObjectName  = name;
+        vkSetDebugUtilsObjectNameEXT_fn(skg_device.device, &info);
+}
+
+static void vk_shader_apply_debug_name(skg_shader_t *shader);
+static void vk_pipeline_apply_debug_name(skg_pipeline_t *pipeline);
 
 //////////////////////////////////////
 
@@ -3785,57 +3852,95 @@ skg_tex_fmt_ skg_native_to_tex_fmt(VkFormat format);
 ///////////////////////////////////////////
 
 bool vk_create_instance(const char *app_name, VkInstance *out_inst) {
-	VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
-	app_info.pApplicationName   = app_name;
-	app_info.pEngineName        = "No Engine";
-	app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
-	app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
-	app_info.apiVersion         = VK_API_VERSION_1_0;
+        VkApplicationInfo app_info = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
+        app_info.pApplicationName   = app_name;
+        app_info.pEngineName        = "No Engine";
+        app_info.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+        app_info.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
+        app_info.apiVersion         = VK_API_VERSION_1_0;
 
-	// Create instance
-	const char *ext[] = { 
-		
-		VK_KHR_SURFACE_EXTENSION_NAME,
-		VK_KHR_WIN32_SURFACE_EXTENSION_NAME,
-		VK_EXT_DEBUG_REPORT_EXTENSION_NAME,
-		 };
-	const char *layers[] = {
-		"VK_LAYER_KHRONOS_validation"
-	};
-	VkInstanceCreateInfo create_info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
-	create_info.pApplicationInfo        = &app_info;
-	create_info.enabledExtensionCount   = _countof(ext);
-	create_info.ppEnabledExtensionNames = ext;
-	create_info.enabledLayerCount       = _countof(layers);
-	create_info.ppEnabledLayerNames     = layers;
+        uint32_t ext_count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, nullptr);
+        VkExtensionProperties *ext_props = nullptr;
+        if (ext_count > 0) {
+                ext_props = (VkExtensionProperties *)malloc(sizeof(VkExtensionProperties) * ext_count);
+                vkEnumerateInstanceExtensionProperties(nullptr, &ext_count, ext_props);
+        }
 
-	VkResult result = vkCreateInstance(&create_info, 0, out_inst);
+#if defined(_WIN32)
+        const char *platform_ext = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+#elif defined(__linux__)
+        const char *platform_ext = VK_KHR_XLIB_SURFACE_EXTENSION_NAME;
+#else
+        const char *platform_ext = nullptr;
+#endif
 
-	VkDebugReportCallbackCreateInfoEXT callback_info = { VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT };
-	callback_info.flags = 
-		//VK_DEBUG_REPORT_INFORMATION_BIT_EXT |
-		VK_DEBUG_REPORT_WARNING_BIT_EXT | 
-		VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT  | 
-		VK_DEBUG_REPORT_ERROR_BIT_EXT  | 
-		VK_DEBUG_REPORT_DEBUG_BIT_EXT ;
-	callback_info.pfnCallback = [](
-		VkDebugReportFlagsEXT                       flags,
-		VkDebugReportObjectTypeEXT                  objectType,
-		uint64_t                                    object,
-		size_t                                      location,
-		int32_t                                     messageCode,
-		const char*                                 pLayerPrefix,
-		const char*                                 pMessage,
-		void*                                       pUserData) {
-			skg_log(skg_log_info, pMessage);
-			return (VkBool32)VK_FALSE;
-	};
-	VkDebugReportCallbackEXT callback;
+        bool has_surface       = vk_extension_supported(ext_props, ext_count, VK_KHR_SURFACE_EXTENSION_NAME);
+        bool has_platform      = platform_ext ? vk_extension_supported(ext_props, ext_count, platform_ext) : false;
+        bool has_debug_report  = vk_extension_supported(ext_props, ext_count, VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+        bool has_debug_utils   = vk_extension_supported(ext_props, ext_count, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
-	PFN_vkCreateDebugReportCallbackEXT debugCallback = (PFN_vkCreateDebugReportCallbackEXT)vkGetInstanceProcAddr(*out_inst, "vkCreateDebugReportCallbackEXT");
-	debugCallback(*out_inst, &callback_info, nullptr, &callback);
+        array_t<const char*> instance_exts = {};
+        if (has_surface) instance_exts.add(VK_KHR_SURFACE_EXTENSION_NAME);
+        if (platform_ext && has_platform) instance_exts.add(platform_ext);
 
-	return result == VK_SUCCESS;
+        if (!has_surface || (platform_ext && !has_platform)) {
+                if (ext_props) free(ext_props);
+                instance_exts.free();
+                return false;
+        }
+
+        if (has_debug_report) instance_exts.add(VK_EXT_DEBUG_REPORT_EXTENSION_NAME);
+        vk_debug_utils_instance_enabled = has_debug_utils;
+        if (has_debug_utils) instance_exts.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+        const char *layers[] = {
+                "VK_LAYER_KHRONOS_validation"
+        };
+
+        VkInstanceCreateInfo create_info = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
+        create_info.pApplicationInfo        = &app_info;
+        create_info.enabledExtensionCount   = (uint32_t)instance_exts.count;
+        create_info.ppEnabledExtensionNames = instance_exts.data;
+        create_info.enabledLayerCount       = _countof(layers);
+        create_info.ppEnabledLayerNames     = layers;
+
+        VkResult result = vkCreateInstance(&create_info, 0, out_inst);
+
+        if (ext_props) free(ext_props);
+        instance_exts.free();
+
+        if (result != VK_SUCCESS)
+                return false;
+
+        if (has_debug_report) {
+                VkDebugReportCallbackCreateInfoEXT callback_info = { VK_STRUCTURE_TYPE_DEBUG_REPORT_CALLBACK_CREATE_INFO_EXT };
+                callback_info.flags =
+                        VK_DEBUG_REPORT_WARNING_BIT_EXT |
+                        VK_DEBUG_REPORT_PERFORMANCE_WARNING_BIT_EXT |
+                        VK_DEBUG_REPORT_ERROR_BIT_EXT |
+                        VK_DEBUG_REPORT_DEBUG_BIT_EXT;
+                callback_info.pfnCallback = [](
+                        VkDebugReportFlagsEXT,
+                        VkDebugReportObjectTypeEXT,
+                        uint64_t,
+                        size_t,
+                        int32_t,
+                        const char*,
+                        const char*                                 pMessage,
+                        void*) {
+                                skg_log(skg_log_info, pMessage);
+                                return (VkBool32)VK_FALSE;
+                };
+
+                PFN_vkCreateDebugReportCallbackEXT debugCallback = (PFN_vkCreateDebugReportCallbackEXT)vkGetInstanceProcAddr(*out_inst, "vkCreateDebugReportCallbackEXT");
+                if (debugCallback != nullptr) {
+                        VkDebugReportCallbackEXT callback = VK_NULL_HANDLE;
+                        debugCallback(*out_inst, &callback_info, nullptr, &callback);
+                }
+        }
+
+        return true;
 }
 
 ///////////////////////////////////////////
@@ -3850,20 +3955,18 @@ bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device)
 	if (vkCreateWin32SurfaceKHR(inst, &surface_info, nullptr, &out_device->surface) != VK_SUCCESS)
 		return false;
 #elif defined(__linux__)
-	struct skg_linux_native_window_t {
-		Display *display;
-		Window   window;
-	};
-
-	Display *display = nullptr;
-	Window   window  = 0;
-	if (app_hwnd != nullptr) {
-		const skg_linux_native_window_t *native = (const skg_linux_native_window_t *)app_hwnd;
-		display = native->display;
-		window  = native->window;
-	}
-	if (display == nullptr || window == 0)
-		return false;
+        Display *display = nullptr;
+        Window   window  = 0;
+        if (app_hwnd != nullptr) {
+                const skg_linux_native_window_t *native = (const skg_linux_native_window_t *)app_hwnd;
+                display = native->display;
+                window  = native->window;
+        } else if (vk_cached_display != nullptr && vk_cached_window != 0) {
+                display = vk_cached_display;
+                window  = vk_cached_window;
+        }
+        if (display == nullptr || window == 0)
+                return false;
 
 	VkXlibSurfaceCreateInfoKHR surface_info = { VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR };
 	surface_info.dpy    = display;
@@ -3964,20 +4067,57 @@ bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device)
 	device_queue_info[1].queueCount       = 1;
 	device_queue_info[1].pQueuePriorities = &queue_priority;
 
-	const char *enabled_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        uint32_t device_ext_count = 0;
+        vkEnumerateDeviceExtensionProperties(out_device->phys_device, nullptr, &device_ext_count, nullptr);
+        VkExtensionProperties *device_ext_props = nullptr;
+        if (device_ext_count > 0) {
+                device_ext_props = (VkExtensionProperties *)malloc(sizeof(VkExtensionProperties) * device_ext_count);
+                vkEnumerateDeviceExtensionProperties(out_device->phys_device, nullptr, &device_ext_count, device_ext_props);
+        }
+
+        bool has_swapchain_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        bool has_debug_utils    = vk_extension_supported(device_ext_props, device_ext_count, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (device_ext_props) free(device_ext_props);
+        if (!has_swapchain_ext)
+                return false;
+
+        array_t<const char*> enabled_exts = {};
+        enabled_exts.add(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        bool enable_debug_utils = vk_debug_utils_instance_enabled && has_debug_utils;
+        if (enable_debug_utils)
+                enabled_exts.add(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+        vkSetDebugUtilsObjectNameEXT_fn = nullptr;
+        vkCmdBeginDebugUtilsLabelEXT_fn = nullptr;
+        vkCmdEndDebugUtilsLabelEXT_fn   = nullptr;
+        vk_debug_utils_naming_enabled   = false;
+        vk_debug_utils_labels_enabled   = false;
+
         VkDeviceCreateInfo device_create_info = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         device_create_info.queueCreateInfoCount    = _countof(device_queue_info);
         device_create_info.pQueueCreateInfos       = device_queue_info;
-        device_create_info.enabledExtensionCount   = _countof(enabled_exts);
-        device_create_info.ppEnabledExtensionNames = enabled_exts;
+        device_create_info.enabledExtensionCount   = (uint32_t)enabled_exts.count;
+        device_create_info.ppEnabledExtensionNames = enabled_exts.data;
         device_create_info.pEnabledFeatures        = &vk_device_features;
 
-        if (vkCreateDevice(out_device->phys_device, &device_create_info, NULL, &out_device->device) != VK_SUCCESS)
+        if (vkCreateDevice(out_device->phys_device, &device_create_info, NULL, &out_device->device) != VK_SUCCESS) {
+                enabled_exts.free();
                 return false;
+        }
 
-	vkGetDeviceQueue(out_device->device, out_device->queue_gfx_index,     0, &out_device->queue_gfx);
-	vkGetDeviceQueue(out_device->device, out_device->queue_present_index, 0, &out_device->queue_present);
-	return true;
+        if (enable_debug_utils) {
+                vkSetDebugUtilsObjectNameEXT_fn = (PFN_vkSetDebugUtilsObjectNameEXT)vkGetDeviceProcAddr(out_device->device, "vkSetDebugUtilsObjectNameEXT");
+                vkCmdBeginDebugUtilsLabelEXT_fn = (PFN_vkCmdBeginDebugUtilsLabelEXT)vkGetDeviceProcAddr(out_device->device, "vkCmdBeginDebugUtilsLabelEXT");
+                vkCmdEndDebugUtilsLabelEXT_fn   = (PFN_vkCmdEndDebugUtilsLabelEXT)vkGetDeviceProcAddr(out_device->device, "vkCmdEndDebugUtilsLabelEXT");
+                vk_debug_utils_naming_enabled = vkSetDebugUtilsObjectNameEXT_fn != nullptr;
+                vk_debug_utils_labels_enabled = vkCmdBeginDebugUtilsLabelEXT_fn != nullptr && vkCmdEndDebugUtilsLabelEXT_fn != nullptr;
+        }
+
+        enabled_exts.free();
+
+        vkGetDeviceQueue(out_device->device, out_device->queue_gfx_index,     0, &out_device->queue_gfx);
+        vkGetDeviceQueue(out_device->device, out_device->queue_present_index, 0, &out_device->queue_present);
+        return true;
 }
 
 ///////////////////////////////////////////
@@ -4060,10 +4200,20 @@ static VkCompareOp vk_compare_op_from_skg(skg_sample_compare_ compare) {
 }
 
 void skg_setup_xlib(void *dpy, void *vi, void *fbconfig, void *drawable) {
+#if defined(__linux__)
+        vk_cached_display     = (Display *)dpy;
+        vk_cached_visual_info = vi;
+        vk_cached_fbconfig    = fbconfig;
+        if (drawable != nullptr)
+                vk_cached_window = *(Window *)drawable;
+        else
+                vk_cached_window = 0;
+#else
         (void)dpy;
         (void)vi;
         (void)fbconfig;
         (void)drawable;
+#endif
 }
 
 int32_t skg_init(const char *app_name, void *app_hwnd, void *adapter_id) {
@@ -4348,14 +4498,25 @@ bool skg_capability(skg_cap_ capability) {
 ///////////////////////////////////////////
 
 void skg_event_begin(const char *name) {
-        (void)name;
-        // TODO: Hook up VK_EXT_debug_utils markers to mirror D3D event annotations.
+        if (!vk_debug_utils_labels_enabled || name == nullptr)
+                return;
+        VkCommandBuffer cmd = (skg_active_rendertarget != nullptr) ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE;
+        if (cmd == VK_NULL_HANDLE)
+                return;
+        VkDebugUtilsLabelEXT label = { VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT };
+        label.pLabelName = name;
+        vkCmdBeginDebugUtilsLabelEXT_fn(cmd, &label);
 }
 
 ///////////////////////////////////////////
 
 void skg_event_end() {
-        // TODO: Hook up VK_EXT_debug_utils markers to mirror D3D event annotations.
+        if (!vk_debug_utils_labels_enabled)
+                return;
+        VkCommandBuffer cmd = (skg_active_rendertarget != nullptr) ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE;
+        if (cmd == VK_NULL_HANDLE)
+                return;
+        vkCmdEndDebugUtilsLabelEXT_fn(cmd);
 }
 
 ///////////////////////////////////////////
@@ -4857,9 +5018,9 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
 ///////////////////////////////////////////
 
 void skg_buffer_name(skg_buffer_t *buffer, const char *name) {
-        (void)buffer;
-        (void)name;
-        // TODO: Expose debug naming through VK_EXT_debug_utils.
+        if (buffer == nullptr)
+                return;
+        vk_set_debug_name(VK_OBJECT_TYPE_BUFFER, (uint64_t)buffer->buffer, name);
 }
 
 ///////////////////////////////////////////
@@ -5043,8 +5204,19 @@ skg_mesh_t skg_mesh_create(const skg_buffer_t *vert_buffer, const skg_buffer_t *
 }
 
 void skg_mesh_name(skg_mesh_t *mesh, const char *name) {
-        (void)mesh;
-        (void)name;
+        if (mesh == nullptr || name == nullptr || name[0] == '\0')
+                return;
+
+        if (mesh->vert_buffer != VK_NULL_HANDLE) {
+                char buffer_name[256];
+                snprintf(buffer_name, sizeof(buffer_name), "%s_verts", name);
+                vk_set_debug_name(VK_OBJECT_TYPE_BUFFER, (uint64_t)mesh->vert_buffer, buffer_name);
+        }
+        if (mesh->ind_buffer != VK_NULL_HANDLE) {
+                char buffer_name[256];
+                snprintf(buffer_name, sizeof(buffer_name), "%s_inds", name);
+                vk_set_debug_name(VK_OBJECT_TYPE_BUFFER, (uint64_t)mesh->ind_buffer, buffer_name);
+        }
 }
 
 void skg_mesh_set_verts(skg_mesh_t *mesh, const skg_buffer_t *vert_buffer) {
@@ -5100,6 +5272,33 @@ void skg_shader_stage_destroy(skg_shader_stage_t *stage) {
 // Shader                                //
 ///////////////////////////////////////////
 
+static void vk_shader_apply_debug_name(skg_shader_t *shader) {
+        if (!vk_debug_utils_naming_enabled || shader == nullptr || shader->debug_name == nullptr)
+                return;
+
+        char name_buffer[256];
+        if (shader->_vertex != VK_NULL_HANDLE) {
+                snprintf(name_buffer, sizeof(name_buffer), "%s_vs", shader->debug_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_SHADER_MODULE, (uint64_t)shader->_vertex, name_buffer);
+        }
+        if (shader->_pixel != VK_NULL_HANDLE) {
+                snprintf(name_buffer, sizeof(name_buffer), "%s_ps", shader->debug_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_SHADER_MODULE, (uint64_t)shader->_pixel, name_buffer);
+        }
+        if (shader->_compute != VK_NULL_HANDLE) {
+                snprintf(name_buffer, sizeof(name_buffer), "%s_cs", shader->debug_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_SHADER_MODULE, (uint64_t)shader->_compute, name_buffer);
+        }
+        if (shader->compute_layout != VK_NULL_HANDLE) {
+                snprintf(name_buffer, sizeof(name_buffer), "%s_cs_layout", shader->debug_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_PIPELINE_LAYOUT, (uint64_t)shader->compute_layout, name_buffer);
+        }
+        if (shader->compute_pipeline != VK_NULL_HANDLE) {
+                snprintf(name_buffer, sizeof(name_buffer), "%s_cs_pipeline", shader->debug_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_PIPELINE, (uint64_t)shader->compute_pipeline, name_buffer);
+        }
+}
+
 skg_shader_t skg_shader_create_manual(skg_shader_meta_t *meta, skg_shader_stage_t v_shader, skg_shader_stage_t p_shader, skg_shader_stage_t c_shader) {
         skg_shader_t result = {};
         result.meta     = meta;
@@ -5118,9 +5317,10 @@ skg_shader_t skg_shader_create_manual(skg_shader_meta_t *meta, skg_shader_stage_
 }
 
 void skg_shader_name(skg_shader_t *shader, const char *name) {
-        (void)shader;
-        (void)name;
-        // TODO: Expose shader module debug naming through VK_EXT_debug_utils.
+        if (shader == nullptr)
+                return;
+        vk_assign_debug_name(&shader->debug_name, name);
+        vk_shader_apply_debug_name(shader);
 }
 
 bool skg_shader_is_valid(const skg_shader_t *shader) {
@@ -5160,6 +5360,7 @@ static bool vk_shader_ensure_compute_pipeline(skg_shader_t *shader) {
                 return false;
         }
 
+        vk_shader_apply_debug_name(shader);
         return true;
 }
 
@@ -5202,6 +5403,10 @@ void skg_shader_destroy(skg_shader_t *shader) {
         }
 
         skg_shader_meta_release(shader->meta);
+        if (shader->debug_name) {
+                free(shader->debug_name);
+                shader->debug_name = nullptr;
+        }
         *shader = {};
 }
 
@@ -5248,6 +5453,26 @@ static void vk_pipeline_release_handles(skg_pipeline_t *pipeline) {
         if (pipeline->pipeline_layout != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(skg_device.device, pipeline->pipeline_layout, nullptr);
                 pipeline->pipeline_layout = VK_NULL_HANDLE;
+        }
+}
+
+static void vk_pipeline_apply_debug_name(skg_pipeline_t *pipeline) {
+        if (!vk_debug_utils_naming_enabled || pipeline == nullptr || pipeline->debug_name == nullptr)
+                return;
+
+        if (pipeline->pipeline_layout != VK_NULL_HANDLE)
+                vk_set_debug_name(VK_OBJECT_TYPE_PIPELINE_LAYOUT, (uint64_t)pipeline->pipeline_layout, pipeline->debug_name);
+
+        if (pipeline->pipeline >= 0) {
+                vk_pipeline_t &cached = vk_pipeline_cache[pipeline->pipeline];
+                for (size_t i = 0; i < cached.pipelines.count; i++) {
+                        VkPipeline handle = cached.pipelines[i];
+                        if (handle == VK_NULL_HANDLE)
+                                continue;
+                        char pipeline_name[256];
+                        snprintf(pipeline_name, sizeof(pipeline_name), "%s[%zu]", pipeline->debug_name, i);
+                        vk_set_debug_name(VK_OBJECT_TYPE_PIPELINE, (uint64_t)handle, pipeline_name);
+                }
         }
 }
 
@@ -5428,6 +5653,7 @@ static bool vk_pipeline_ensure_ready(skg_pipeline_t *pipeline) {
         }
 
         pipeline->dirty = false;
+        vk_pipeline_apply_debug_name(pipeline);
         return true;
 }
 
@@ -5454,9 +5680,10 @@ skg_pipeline_t skg_pipeline_create(skg_shader_t *shader) {
 }
 
 void skg_pipeline_name(skg_pipeline_t *pipeline, const char* name) {
-        (void)pipeline;
-        (void)name;
-        // TODO: Wire up VK_EXT_debug_utils names for pipeline state objects.
+        if (pipeline == nullptr)
+                return;
+        vk_assign_debug_name(&pipeline->debug_name, name);
+        vk_pipeline_apply_debug_name(pipeline);
 }
 
 void skg_pipeline_bind(const skg_pipeline_t *pipeline) {
@@ -5567,6 +5794,10 @@ void skg_pipeline_destroy(skg_pipeline_t *pipeline) {
         vk_pipeline_release_handles(pipeline);
         if (pipeline->meta)
                 skg_shader_meta_release(pipeline->meta);
+        if (pipeline->debug_name) {
+                free(pipeline->debug_name);
+                pipeline->debug_name = nullptr;
+        }
         *pipeline = {};
 }
 

@@ -43,6 +43,7 @@ typedef struct skg_shader_t {
         VkShaderModule     _compute;
         VkPipeline         compute_pipeline;
         VkPipelineLayout   compute_layout;
+        char              *debug_name;
 } skg_shader_t;
 
 typedef struct skg_pipeline_t {
@@ -62,6 +63,7 @@ typedef struct skg_pipeline_t {
 
         int64_t                pipeline;
         VkPipelineLayout       pipeline_layout;
+        char                  *debug_name;
 } skg_pipeline_t;
 
 typedef struct skg_tex_t {
