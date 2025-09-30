@@ -4059,6 +4059,13 @@ static VkCompareOp vk_compare_op_from_skg(skg_sample_compare_ compare) {
         }
 }
 
+void skg_setup_xlib(void *dpy, void *vi, void *fbconfig, void *drawable) {
+        (void)dpy;
+        (void)vi;
+        (void)fbconfig;
+        (void)drawable;
+}
+
 int32_t skg_init(const char *app_name, void *app_hwnd, void *adapter_id) {
         VkResult result = VK_ERROR_INITIALIZATION_FAILED;
 
@@ -6981,6 +6988,67 @@ bool skg_tex_get_mip_contents_arr(skg_tex_t *tex, int32_t mip_level, int32_t arr
 
         return true;
 }
+
+///////////////////////////////////////////
+
+bool skg_tex_gen_mips(skg_tex_t *tex) {
+        if (tex == nullptr || tex->texture == VK_NULL_HANDLE)
+                return false;
+        if (tex->mip_count <= 1)
+                return true;
+        if (tex->multisample > 1) {
+                skg_log(skg_log_warning, "Cannot generate mips for multisampled textures on Vulkan");
+                return false;
+        }
+        if (skg_tex_fmt_is_depth(tex->format)) {
+                skg_log(skg_log_warning, "Cannot generate mips for depth textures on Vulkan");
+                return false;
+        }
+
+        VkFormat vk_format = (VkFormat)skg_tex_fmt_to_native(tex->format);
+        if (vk_format == VK_FORMAT_UNDEFINED) {
+                skg_log(skg_log_warning, "Unsupported texture format for Vulkan mip generation");
+                return false;
+        }
+
+        uint32_t mip_levels  = tex->mip_count > 0 ? tex->mip_count : 1u;
+        uint32_t layer_count = tex->array_count > 0 ? (uint32_t)tex->array_count : 1u;
+        VkImageAspectFlags aspect = vk_aspect_from_format(tex->format);
+
+        VkCommandBuffer cmd = vk_begin_transient_cmd();
+        if (cmd == VK_NULL_HANDLE) {
+                skg_log(skg_log_critical, "Failed to acquire command buffer for mip generation");
+                return false;
+        }
+
+        VkImageLayout original_layout = tex->layout;
+        VkImageLayout final_layout    = vk_target_layout_for_tex(tex);
+        if (tex->texture_mem == VK_NULL_HANDLE && original_layout != VK_IMAGE_LAYOUT_UNDEFINED)
+                final_layout = original_layout;
+        if (final_layout == VK_IMAGE_LAYOUT_UNDEFINED)
+                final_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        vk_transition_image(cmd, tex->texture, original_layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, aspect, mip_levels, layer_count);
+        tex->layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+
+        vk_generate_mips(cmd, tex->texture, vk_format, tex->width, tex->height, mip_levels, layer_count, aspect);
+
+        vk_transition_image(cmd, tex->texture, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, final_layout, aspect, mip_levels, layer_count);
+        vk_end_transient_cmd(cmd);
+
+        tex->layout = final_layout;
+        vk_mark_descriptor_dirty(skg_stage_vertex | skg_stage_pixel | skg_stage_compute);
+        return true;
+}
+
+///////////////////////////////////////////
+
+void* skg_tex_get_native(const skg_tex_t *tex) {
+        return tex != nullptr ? (void*)tex->texture : nullptr;
+}
+
+///////////////////////////////////////////
+
 void skg_tex_clear(skg_bind_t bind) {
         VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         write.dstSet          = vk_descriptor_set;
@@ -7118,10 +7186,10 @@ void skg_tex_destroy(skg_tex_t *tex) {
 ///////////////////////////////////////////
 
 int64_t skg_tex_fmt_to_native(skg_tex_fmt_ format) {
-	switch (format) {
-	case skg_tex_fmt_rgba32:        return VK_FORMAT_R8G8B8A8_SRGB;
-	case skg_tex_fmt_rgba32_linear: return VK_FORMAT_R8G8B8A8_UNORM;
-	case skg_tex_fmt_bgra32:        return VK_FORMAT_B8G8R8A8_SRGB;
+        switch (format) {
+        case skg_tex_fmt_rgba32:        return VK_FORMAT_R8G8B8A8_SRGB;
+        case skg_tex_fmt_rgba32_linear: return VK_FORMAT_R8G8B8A8_UNORM;
+        case skg_tex_fmt_bgra32:        return VK_FORMAT_B8G8R8A8_SRGB;
 	case skg_tex_fmt_bgra32_linear: return VK_FORMAT_B8G8R8A8_UNORM;
 	case skg_tex_fmt_rgba64:        return VK_FORMAT_R16G16B16A16_UNORM;
 	case skg_tex_fmt_rgba128:       return VK_FORMAT_R32G32B32A32_SFLOAT;
@@ -7131,17 +7199,39 @@ int64_t skg_tex_fmt_to_native(skg_tex_fmt_ format) {
 	case skg_tex_fmt_r8:            return VK_FORMAT_R8_UNORM;
 	case skg_tex_fmt_r16:           return VK_FORMAT_R16_UNORM;
 	case skg_tex_fmt_r32:           return VK_FORMAT_R32_SFLOAT;
-	default: return VK_FORMAT_UNDEFINED;
-	}
+        default: return VK_FORMAT_UNDEFINED;
+        }
+}
+
+///////////////////////////////////////////
+
+skg_tex_fmt_ skg_tex_fmt_from_native(int64_t format) {
+        return skg_native_to_tex_fmt((VkFormat)format);
+}
+
+///////////////////////////////////////////
+
+bool skg_tex_fmt_supported(skg_tex_fmt_ format) {
+        VkFormat vk_format = (VkFormat)skg_tex_fmt_to_native(format);
+        if (vk_format == VK_FORMAT_UNDEFINED)
+                return false;
+
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(skg_device.phys_device, vk_format, &props);
+
+        VkFormatFeatureFlags features = props.optimalTilingFeatures;
+        if (skg_tex_fmt_is_depth(format))
+                return (features & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) != 0;
+        return (features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
 }
 
 ///////////////////////////////////////////
 
 skg_tex_fmt_ skg_native_to_tex_fmt(VkFormat format) {
-	switch (format) {
-	case VK_FORMAT_R8G8B8A8_SRGB:       return skg_tex_fmt_rgba32;
-	case VK_FORMAT_R8G8B8A8_UNORM:      return skg_tex_fmt_rgba32_linear;
-	case VK_FORMAT_B8G8R8A8_SRGB:       return skg_tex_fmt_bgra32;
+        switch (format) {
+        case VK_FORMAT_R8G8B8A8_SRGB:       return skg_tex_fmt_rgba32;
+        case VK_FORMAT_R8G8B8A8_UNORM:      return skg_tex_fmt_rgba32_linear;
+        case VK_FORMAT_B8G8R8A8_SRGB:       return skg_tex_fmt_bgra32;
 	case VK_FORMAT_B8G8R8A8_UNORM:      return skg_tex_fmt_bgra32_linear;
 	case VK_FORMAT_R16G16B16A16_UNORM:  return skg_tex_fmt_rgba64;
 	case VK_FORMAT_R32G32B32A32_SFLOAT: return skg_tex_fmt_rgba128;
