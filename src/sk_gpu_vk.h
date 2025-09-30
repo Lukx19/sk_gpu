@@ -6,6 +6,9 @@
 #endif
 #include <windows.h>
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif defined(__linux__)
+#include <X11/Xlib.h>
+#define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include <vulkan/vulkan.h>

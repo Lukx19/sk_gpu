@@ -12,6 +12,9 @@
 #endif
 #include <windows.h>
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif defined(__linux__)
+#include <X11/Xlib.h>
+#define VK_USE_PLATFORM_XLIB_KHR
 #endif
 
 #include <vulkan/vulkan.h>
@@ -390,12 +393,36 @@ bool vk_create_instance(const char *app_name, VkInstance *out_inst) {
 bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device) {
 	*out_device = {};
 
-	// Create win32 surface
+#if defined(_WIN32)
 	VkWin32SurfaceCreateInfoKHR surface_info = { VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
 	surface_info.hinstance = GetModuleHandle(0);
 	surface_info.hwnd      = (HWND)app_hwnd;
 	if (vkCreateWin32SurfaceKHR(inst, &surface_info, nullptr, &out_device->surface) != VK_SUCCESS)
 		return false;
+#elif defined(__linux__)
+	struct skg_linux_native_window_t {
+		Display *display;
+		Window   window;
+	};
+
+	Display *display = nullptr;
+	Window   window  = 0;
+	if (app_hwnd != nullptr) {
+		const skg_linux_native_window_t *native = (const skg_linux_native_window_t *)app_hwnd;
+		display = native->display;
+		window  = native->window;
+	}
+	if (display == nullptr || window == 0)
+		return false;
+
+	VkXlibSurfaceCreateInfoKHR surface_info = { VK_STRUCTURE_TYPE_XLIB_SURFACE_CREATE_INFO_KHR };
+	surface_info.dpy    = display;
+	surface_info.window = window;
+	if (vkCreateXlibSurfaceKHR(inst, &surface_info, nullptr, &out_device->surface) != VK_SUCCESS)
+		return false;
+#else
+	(void)app_hwnd;
+#endif
 
 	// Get physical device list
 	uint32_t          device_count;
