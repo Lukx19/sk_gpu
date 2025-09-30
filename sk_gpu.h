@@ -593,7 +593,8 @@ typedef struct skg_tex_t {
         VkDeviceMemory  texture_mem;
         VkImageView     view;
         VkSampler       sampler;
-        VkImageView     rt_depth_view;
+        VkImageView         rt_depth_view;
+        struct skg_tex_t   *rt_depth_tex;
         VkImageLayout   layout;
 
         VkFramebuffer   rt_framebuffer;
@@ -4424,6 +4425,26 @@ void skg_tex_target_bind(float clear_color[4], const skg_tex_t *render_target, c
 
 ///////////////////////////////////////////
 
+void skg_tex_target_bind(skg_tex_t *render_target, int32_t layer_idx, int32_t mip_level) {
+        (void)layer_idx;
+        (void)mip_level;
+
+        if (render_target == nullptr) {
+                skg_active_rendertarget = nullptr;
+                return;
+        }
+
+        if (render_target->type != skg_tex_type_rendertarget) {
+                skg_log(skg_log_warning, "Vulkan backend expects a color render target when binding framebuffers");
+                return;
+        }
+
+        skg_tex_t *depth_tex = render_target->rt_depth_tex;
+        skg_tex_target_bind(nullptr, render_target, depth_tex);
+}
+
+///////////////////////////////////////////
+
 skg_tex_t *skg_tex_target_get() {
         return (skg_tex_t*)skg_active_rendertarget;
 }
@@ -5835,6 +5856,7 @@ static void vk_destroy_tex_gpu_objects(skg_tex_t *tex) {
                 tex->texture_mem = VK_NULL_HANDLE;
         }
         tex->rt_depth_view = VK_NULL_HANDLE;
+        tex->rt_depth_tex  = nullptr;
         tex->layout        = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
@@ -6204,6 +6226,7 @@ void skg_tex_attach_depth(skg_tex_t *tex, skg_tex_t *depth) {
         }
 
         tex->rt_depth_view = depth->view;
+        tex->rt_depth_tex  = depth;
 
         if (tex->rt_commandbuffer == VK_NULL_HANDLE) {
                 VkCommandBufferAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };

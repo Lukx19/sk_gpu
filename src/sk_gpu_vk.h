@@ -80,7 +80,8 @@ typedef struct skg_tex_t {
         VkDeviceMemory  texture_mem;
         VkImageView     view;
         VkSampler       sampler;
-        VkImageView     rt_depth_view;
+        VkImageView         rt_depth_view;
+        struct skg_tex_t   *rt_depth_tex;
         VkImageLayout   layout;
 
         VkFramebuffer   rt_framebuffer;
