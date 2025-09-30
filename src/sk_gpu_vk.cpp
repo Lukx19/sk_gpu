@@ -2150,7 +2150,7 @@ static bool vk_swapchain_init_textures(skg_swapchain_t *swapchain) {
 
         for (uint32_t i = 0; i < swapchain->img_count; i++) {
                 swapchain->textures[i] = skg_tex_create_from_existing(&swapchain->imgs[i], skg_tex_type_rendertarget,
-                        skg_native_to_tex_fmt(swapchain->format.format), swapchain->width, swapchain->height, 1, 1, 1);
+                        swapchain->color_format, swapchain->width, swapchain->height, 1, 1, 1);
                 if (vkCreateFence(skg_device.device, &fence_info, nullptr, &swapchain->img_fence[i]) != VK_SUCCESS) {
                         skg_log(skg_log_critical, "failed to create swapchain fence");
                         return false;
@@ -2172,6 +2172,11 @@ skg_swapchain_t skg_swapchain_create(void *hwnd, skg_tex_fmt_ format, skg_tex_fm
         (void)hwnd;
 
         result.color_format = skg_native_to_tex_fmt(result.format.format);
+        switch (result.color_format) {
+        case skg_tex_fmt_rgba32_linear: result.color_format = skg_tex_fmt_rgba32; break;
+        case skg_tex_fmt_bgra32_linear: result.color_format = skg_tex_fmt_bgra32; break;
+        default: break;
+        }
         result.depth_format = depth_format;
 
         VkSurfaceCapabilitiesKHR surface_caps;
@@ -2358,13 +2363,13 @@ void skg_swapchain_bind(skg_swapchain_t *swapchain) {
 const skg_tex_t *skg_swapchain_get_target(const skg_swapchain_t *swapchain) {
         if (swapchain == nullptr || swapchain->textures == nullptr)
                 return nullptr;
-        uint32_t index = swapchain->img_curr < swapchain->img_count ? swapchain->img_curr : 0;
+        uint32_t index = swapchain->img_active < swapchain->img_count ? swapchain->img_active : 0;
         return &swapchain->textures[index];
 }
 const skg_tex_t *skg_swapchain_get_depth(const skg_swapchain_t *swapchain) {
         if (swapchain == nullptr || swapchain->depths == nullptr)
                 return nullptr;
-        uint32_t index = swapchain->img_curr < swapchain->img_count ? swapchain->img_curr : 0;
+        uint32_t index = swapchain->img_active < swapchain->img_count ? swapchain->img_active : 0;
         return &swapchain->depths[index];
 }
 
@@ -3596,10 +3601,12 @@ void skg_tex_destroy(skg_tex_t *tex) {
         if (tex->rt_commandbuffer != VK_NULL_HANDLE)
                 vkFreeCommandBuffers(skg_device.device, vk_cmd_pool, 1, &tex->rt_commandbuffer);
 
-        if (tex->view)        vkDestroyImageView  (skg_device.device, tex->view,        nullptr);
-        if (tex->sampler)     vkDestroySampler    (skg_device.device, tex->sampler,     nullptr);
-        if (tex->texture)     vkDestroyImage      (skg_device.device, tex->texture,     nullptr);
-        if (tex->texture_mem) vkFreeMemory        (skg_device.device, tex->texture_mem, nullptr);
+        if (tex->view)    vkDestroyImageView  (skg_device.device, tex->view,    nullptr);
+        if (tex->sampler) vkDestroySampler    (skg_device.device, tex->sampler, nullptr);
+        if (tex->texture_mem != VK_NULL_HANDLE) {
+                if (tex->texture) vkDestroyImage(skg_device.device, tex->texture, nullptr);
+                vkFreeMemory(skg_device.device, tex->texture_mem, nullptr);
+        }
         *tex = {};
 }
 
