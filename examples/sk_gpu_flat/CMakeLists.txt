@@ -6,8 +6,6 @@ project(skg_flatscreen VERSION 1.0
 
 set(EXECUTABLE_OUTPUT_PATH ${CMAKE_BINARY_DIR})
 
-find_package(X11 REQUIRED)
-
 if (NOT DEFINED SKGPU_TEST_USE_GL)
     if (EMSCRIPTEN)
         set(SKGPU_TEST_USE_GL ON)
@@ -50,7 +48,17 @@ if (COMMAND skshaderc_compile_headers)
         ../common/test.hlsl)
 endif()
 
-set(SKGPU_EXAMPLE_LIBS ${X11_LIBRARIES})
+set(SKGPU_EXAMPLE_LIBS)
+
+if (WIN32)
+    list(APPEND SKGPU_EXAMPLE_LIBS
+        user32
+        gdi32
+        shell32)
+else()
+    find_package(X11 REQUIRED)
+    list(APPEND SKGPU_EXAMPLE_LIBS ${X11_LIBRARIES})
+endif()
 
 if (SKGPU_TEST_USE_GL)
     target_compile_definitions(skg_flatscreen PRIVATE SKGPU_TEST_USE_GL=1 SKG_FORCE_OPENGL)
