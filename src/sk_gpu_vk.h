@@ -77,6 +77,7 @@ typedef struct skg_tex_t {
         skg_tex_fmt_    format;
         skg_mip_        mips;
         uint32_t        mip_count;
+        char           *debug_name;
 
         VkImage         texture;
         VkDeviceMemory  texture_mem;

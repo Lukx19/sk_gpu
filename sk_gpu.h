@@ -593,6 +593,7 @@ typedef struct skg_tex_t {
         skg_tex_fmt_    format;
         skg_mip_        mips;
         uint32_t        mip_count;
+        char           *debug_name;
 
         VkImage         texture;
         VkDeviceMemory  texture_mem;
@@ -3519,6 +3520,7 @@ static void vk_set_debug_name(VkObjectType type, uint64_t handle, const char *na
 
 static void vk_shader_apply_debug_name(skg_shader_t *shader);
 static void vk_pipeline_apply_debug_name(skg_pipeline_t *pipeline);
+static void vk_tex_apply_debug_name(skg_tex_t *tex);
 
 //////////////////////////////////////
 
@@ -5159,8 +5161,10 @@ void skg_buffer_set_contents(skg_buffer_t *buffer, const void *data, uint32_t si
 
         uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
         uint32_t copy_size = size_bytes;
-        if (capacity != 0 && copy_size > capacity)
+        if (capacity != 0 && copy_size > capacity) {
+                skg_logf(skg_log_warning, "Truncating Vulkan buffer upload from %u to %u bytes", size_bytes, (uint32_t)capacity);
                 copy_size = (uint32_t)capacity;
+        }
         if (copy_size == 0)
                 return;
 
@@ -5177,6 +5181,8 @@ void skg_buffer_set_contents(skg_buffer_t *buffer, const void *data, uint32_t si
 
         if (map_result == VK_SUCCESS)
                 vkUnmapMemory(skg_device.device, buffer->memory);
+        else
+                skg_log(skg_log_warning, "Vulkan buffer not host-visible; staging upload required");
 
         VkBuffer staging = VK_NULL_HANDLE;
         VkDeviceMemory staging_memory = VK_NULL_HANDLE;
@@ -5221,8 +5227,10 @@ void skg_buffer_get_contents(const skg_buffer_t *buffer, void *ref_buffer, uint3
 
         uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
         uint32_t copy_size = buffer_size;
-        if (capacity != 0 && copy_size > capacity)
+        if (capacity != 0 && copy_size > capacity) {
+                skg_logf(skg_log_warning, "Truncating Vulkan buffer readback from %u to %u bytes", buffer_size, (uint32_t)capacity);
                 copy_size = (uint32_t)capacity;
+        }
         if (copy_size == 0) {
                 memset(ref_buffer, 0, buffer_size);
                 return;
@@ -5240,6 +5248,8 @@ void skg_buffer_get_contents(const skg_buffer_t *buffer, void *ref_buffer, uint3
 
         if (map_result == VK_SUCCESS)
                 vkUnmapMemory(skg_device.device, buffer->memory);
+        else
+                skg_log(skg_log_warning, "Vulkan buffer not host-visible; staging readback required");
 
         VkBuffer staging = VK_NULL_HANDLE;
         VkDeviceMemory staging_memory = VK_NULL_HANDLE;
@@ -5700,6 +5710,33 @@ static void vk_pipeline_apply_debug_name(skg_pipeline_t *pipeline) {
                         snprintf(pipeline_name, sizeof(pipeline_name), "%s[%zu]", pipeline->debug_name, i);
                         vk_set_debug_name(VK_OBJECT_TYPE_PIPELINE, (uint64_t)handle, pipeline_name);
                 }
+        }
+}
+
+static void vk_tex_apply_debug_name(skg_tex_t *tex) {
+        if (!vk_debug_utils_naming_enabled || tex == nullptr || tex->debug_name == nullptr)
+                return;
+
+        const char *base_name = tex->debug_name;
+        if (tex->texture != VK_NULL_HANDLE)
+                vk_set_debug_name(VK_OBJECT_TYPE_IMAGE, (uint64_t)tex->texture, base_name);
+
+        if (tex->view != VK_NULL_HANDLE) {
+                char view_name[256];
+                snprintf(view_name, sizeof(view_name), "%s_view", base_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_IMAGE_VIEW, (uint64_t)tex->view, view_name);
+        }
+
+        if (tex->sampler != VK_NULL_HANDLE) {
+                char sampler_name[256];
+                snprintf(sampler_name, sizeof(sampler_name), "%s_sampler", base_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_SAMPLER, (uint64_t)tex->sampler, sampler_name);
+        }
+
+        if (tex->rt_framebuffer != VK_NULL_HANDLE) {
+                char framebuffer_name[256];
+                snprintf(framebuffer_name, sizeof(framebuffer_name), "%s_fb", base_name);
+                vk_set_debug_name(VK_OBJECT_TYPE_FRAMEBUFFER, (uint64_t)tex->rt_framebuffer, framebuffer_name);
         }
 }
 
@@ -6606,6 +6643,8 @@ void skg_tex_create_views(skg_tex_t *tex) {
                         skg_log(skg_log_critical, "failed to allocate command buffers!");
                 }
         }
+
+        vk_tex_apply_debug_name(tex);
 }
 
 skg_tex_t skg_tex_create_from_existing(void *native_tex, skg_tex_type_ type, skg_tex_fmt_ format,
@@ -6807,6 +6846,8 @@ void skg_tex_attach_depth(skg_tex_t *tex, skg_tex_t *depth) {
                 alloc_info.commandBufferCount = 1;
                 vkAllocateCommandBuffers(skg_device.device, &alloc_info, &tex->rt_commandbuffer);
         }
+
+        vk_tex_apply_debug_name(tex);
 }
 skg_tex_t            skg_tex_create(skg_tex_type_ type, skg_use_ use, skg_tex_fmt_ format, skg_mip_ mip_maps) {
         skg_tex_t result = {};
@@ -6828,24 +6869,42 @@ void skg_tex_name(skg_tex_t *tex, const char* name) {
 
         vk_named_texture_unregister(tex);
 
-        if (name == nullptr || name[0] == '\0')
+        if (tex->debug_name) {
+                free(tex->debug_name);
+                tex->debug_name = nullptr;
+        }
+
+        if (name == nullptr || name[0] == '\0') {
+                vk_tex_apply_debug_name(tex);
                 return;
+        }
 
         vk_named_texture_unregister_name(name);
 
         size_t name_len = strlen(name);
-        char  *name_copy = (char *)malloc(name_len + 1);
-        if (name_copy == nullptr) {
+        char  *debug_copy = (char *)malloc(name_len + 1);
+        if (debug_copy == nullptr) {
                 skg_log(skg_log_warning, "Failed to allocate storage for texture name");
                 return;
         }
+        memcpy(debug_copy, name, name_len + 1);
+        tex->debug_name = debug_copy;
 
-        memcpy(name_copy, name, name_len + 1);
+        char *registry_copy = (char *)malloc(name_len + 1);
+        if (registry_copy == nullptr) {
+                skg_log(skg_log_warning, "Failed to allocate storage for texture name");
+                free(tex->debug_name);
+                tex->debug_name = nullptr;
+                return;
+        }
+        memcpy(registry_copy, name, name_len + 1);
 
         vk_named_texture_t entry = {};
         entry.tex  = tex;
-        entry.name = name_copy;
+        entry.name = registry_copy;
         vk_named_textures.add(entry);
+
+        vk_tex_apply_debug_name(tex);
 }
 skg_tex_t *skg_tex_find(const char *name) {
         int32_t index = vk_named_texture_find_name(name);
@@ -6899,7 +6958,10 @@ void skg_tex_settings(skg_tex_t *tex, skg_tex_address_ address, skg_tex_sample_ 
         if (vkCreateSampler(skg_device.device, &sampler_info, nullptr, &tex->sampler) != VK_SUCCESS) {
                 tex->sampler = VK_NULL_HANDLE;
                 skg_log(skg_log_critical, "Failed to create sampler state");
+                return;
         }
+
+        vk_tex_apply_debug_name(tex);
 }
 void skg_tex_set_contents(skg_tex_t *tex, const void *data, int32_t width, int32_t height) {
         const void *data_arr[1] = { data };
@@ -7161,6 +7223,8 @@ void skg_tex_set_contents_arr(skg_tex_t *tex, const void **array_data, int32_t a
 
         if (tex->sampler == VK_NULL_HANDLE)
                 skg_tex_settings(tex, skg_tex_address_repeat, skg_tex_sample_linear, skg_sample_compare_none, 0);
+
+        vk_tex_apply_debug_name(tex);
 }
 
 ///////////////////////////////////////////
@@ -7664,6 +7728,10 @@ void skg_tex_destroy(skg_tex_t *tex) {
         if (tex->texture_mem != VK_NULL_HANDLE) {
                 if (tex->texture) vkDestroyImage(skg_device.device, tex->texture, nullptr);
                 vkFreeMemory(skg_device.device, tex->texture_mem, nullptr);
+        }
+        if (tex->debug_name) {
+                free(tex->debug_name);
+                tex->debug_name = nullptr;
         }
         *tex = {};
 }
