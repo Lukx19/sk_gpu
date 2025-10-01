@@ -1216,6 +1216,8 @@ void skg_target_clear(bool depth, const float *clear_color_4) {
 ///////////////////////////////////////////
 
 void skg_tex_target_discard(skg_tex_t *render_target) {
+        // TODO: Provide an explicit discard/invalidate path so tile-based GPUs can
+        // skip resolves once the render target lifecycle is tracked on Vulkan.
         (void)render_target;
 }
 
