@@ -2773,6 +2773,9 @@ void skg_swapchain_present(skg_swapchain_t *swapchain) {
 	vkQueuePresentKHR(skg_device.queue_present, &presentInfo);
 
         swapchain->sync_index = (swapchain->sync_index + 1) % 2;
+
+        if (skg_active_rendertarget != nullptr)
+                skg_active_rendertarget->layout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 }
 
 void skg_swapchain_bind(skg_swapchain_t *swapchain) {
@@ -2848,10 +2851,18 @@ static VkImageAspectFlags vk_aspect_from_format(skg_tex_fmt_ format) {
 }
 
 static VkImageLayout vk_target_layout_for_tex(const skg_tex_t *tex) {
+        if (tex == nullptr)
+                return VK_IMAGE_LAYOUT_GENERAL;
+
+        if (tex->layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+                return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
         if (tex->type == skg_tex_type_zbuffer || tex->type == skg_tex_type_depthtarget)
                 return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
         if ((tex->use & skg_use_compute_write) != 0)
                 return VK_IMAGE_LAYOUT_GENERAL;
+
         return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 }
 
@@ -3027,10 +3038,10 @@ void skg_tex_create_views(skg_tex_t *tex) {
                 color_attch.samples        = VK_SAMPLE_COUNT_1_BIT;
                 color_attch.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
                 color_attch.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-		color_attch.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-		color_attch.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		color_attch.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-		color_attch.finalLayout    = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+                color_attch.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                color_attch.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                color_attch.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+                color_attch.finalLayout    = vk_target_layout_for_tex(tex);
 
 		VkAttachmentReference color_attch_ref = {};
 		color_attch_ref.attachment = 0;
