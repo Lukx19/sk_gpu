@@ -2994,7 +2994,9 @@ skg_swapchain_t skg_swapchain_create(void *hwnd, skg_tex_fmt_ format, skg_tex_fm
                 }
         }
 
-        result.img_curr = 0;
+        result.img_active = 0;
+        result.img_curr   = 0;
+        result.sync_index = 0;
 
         return result;
 }
@@ -3058,7 +3060,9 @@ void skg_swapchain_resize(skg_swapchain_t *swapchain, int32_t width, int32_t hei
                 vk_swapchain_cleanup_textures(swapchain);
         }
 
-        swapchain->img_curr = 0;
+        swapchain->img_active = 0;
+        swapchain->img_curr   = 0;
+        swapchain->sync_index = 0;
 }
 void skg_swapchain_present(skg_swapchain_t *swapchain) {
 	vkCmdEndRenderPass(skg_active_rendertarget->rt_commandbuffer);
