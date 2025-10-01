@@ -3540,7 +3540,8 @@ struct vk_swapchain_t {
 };
 
 skg_device_t skg_device = {};
-VkPhysicalDeviceFeatures vk_device_features = {};
+VkPhysicalDeviceFeatures    vk_device_features   = {};
+VkPhysicalDeviceProperties  vk_device_properties = {};
 static char *vk_adapter_name = nullptr;
 
 //////////////////////////////////////
@@ -4053,7 +4054,8 @@ bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device)
         size_t adapter_len = strlen(best_props.deviceName);
         vk_adapter_name = (char*)malloc(adapter_len + 1);
         memcpy(vk_adapter_name, best_props.deviceName, adapter_len + 1);
-        vk_device_features = best_features;
+        vk_device_features   = best_features;
+        vk_device_properties = best_props;
 
         // Create a logical device from the physical device
         const float queue_priority = 1.0f;
@@ -5099,6 +5101,8 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
+                if (bind.stage_bits & skg_stage_compute)
+                        vk_flush_descriptor_binding_compute(cmd);
         } break;
         case skg_register_resource: {
                 if (bind.slot >= VK_MAX_BUFFER_SLOTS) {
@@ -5119,6 +5123,8 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
+                if (bind.stage_bits & skg_stage_compute)
+                        vk_flush_descriptor_binding_compute(cmd);
         } break;
         case skg_register_readwrite: {
                 if (bind.slot >= VK_MAX_BUFFER_SLOTS) {
@@ -5139,6 +5145,8 @@ void skg_buffer_bind(const skg_buffer_t *buffer, skg_bind_t bind) {
                 vk_mark_descriptor_dirty(bind.stage_bits);
                 if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                         vk_flush_descriptor_binding_graphics();
+                if (bind.stage_bits & skg_stage_compute)
+                        vk_flush_descriptor_binding_compute(cmd);
         } break;
         default: break;
         }
@@ -5180,6 +5188,8 @@ void skg_buffer_clear(skg_bind_t bind) {
         vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
+        if (bind.stage_bits & skg_stage_compute)
+                vk_flush_descriptor_binding_compute(skg_active_rendertarget ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE);
 }
 
 ///////////////////////////////////////////
@@ -5917,8 +5927,8 @@ skg_swapchain_t skg_swapchain_create(void *hwnd, skg_tex_fmt_ format, skg_tex_fm
 	swapchain_info.imageFormat      = result.format.format;
 	swapchain_info.imageColorSpace  = result.format.colorSpace;
 	swapchain_info.imageExtent      = result.extents;
-	swapchain_info.imageArrayLayers = 1; // 2 for stereo;
-	swapchain_info.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        swapchain_info.imageArrayLayers = 1; // 2 for stereo;
+        swapchain_info.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 	swapchain_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	swapchain_info.preTransform     = surface_caps.currentTransform;
 	swapchain_info.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -5993,7 +6003,7 @@ void skg_swapchain_resize(skg_swapchain_t *swapchain, int32_t width, int32_t hei
         swapchain_info.imageColorSpace  = swapchain->format.colorSpace;
         swapchain_info.imageExtent      = new_extent;
         swapchain_info.imageArrayLayers = 1;
-        swapchain_info.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        swapchain_info.imageUsage       = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         swapchain_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         swapchain_info.preTransform     = surface_caps.currentTransform;
         swapchain_info.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -6629,10 +6639,22 @@ void skg_tex_settings(skg_tex_t *tex, skg_tex_address_ address, skg_tex_sample_ 
         sampler_info.addressModeW = vk_address_mode_from_skg(address);
         sampler_info.mipLodBias   = 0.0f;
 
-        float max_aniso = (float)(anisotropy > 0 ? anisotropy : 1);
+        float requested_aniso = (float)(anisotropy > 0 ? anisotropy : 1);
+        float max_supported   = vk_device_features.samplerAnisotropy && vk_device_properties.limits.maxSamplerAnisotropy > 0.0f
+                ? vk_device_properties.limits.maxSamplerAnisotropy
+                : 1.0f;
         if (sample == skg_tex_sample_anisotropic || anisotropy > 1) {
-                sampler_info.anisotropyEnable = VK_TRUE;
-                sampler_info.maxAnisotropy    = max_aniso > 1 ? max_aniso : 16.0f;
+                if (vk_device_features.samplerAnisotropy && max_supported > 1.0f) {
+                        if (requested_aniso < 1.0f)
+                                requested_aniso = max_supported;
+                        if (requested_aniso > max_supported)
+                                requested_aniso = max_supported;
+                        sampler_info.anisotropyEnable = VK_TRUE;
+                        sampler_info.maxAnisotropy    = requested_aniso;
+                } else {
+                        sampler_info.anisotropyEnable = VK_FALSE;
+                        sampler_info.maxAnisotropy    = 1.0f;
+                }
         } else {
                 sampler_info.anisotropyEnable = VK_FALSE;
                 sampler_info.maxAnisotropy    = 1.0f;
@@ -7321,6 +7343,8 @@ void skg_tex_clear(skg_bind_t bind) {
         vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
+        if (bind.stage_bits & skg_stage_compute)
+                vk_flush_descriptor_binding_compute(skg_active_rendertarget ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE);
 }
 
 void skg_tex_bind(const skg_tex_t *tex, skg_bind_t bind) {
@@ -7393,6 +7417,8 @@ void skg_tex_bind(const skg_tex_t *tex, skg_bind_t bind) {
         vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
+        if (bind.stage_bits & skg_stage_compute)
+                vk_flush_descriptor_binding_compute(skg_active_rendertarget ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE);
 }
 
 ///////////////////////////////////////////
