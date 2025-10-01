@@ -3418,6 +3418,7 @@ DXGI_FORMAT skg_ind_to_dxgi(skg_ind_fmt_ format) {
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 #if defined(__linux__)
 static Display *vk_cached_display     = nullptr;
@@ -5059,38 +5060,51 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
         if ((use & skg_use_compute_read) != 0 || (use & skg_use_compute_write) != 0)
                 usage |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
+        // Allow readbacks and staging copies regardless of buffer type.
+        usage |= VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
         if (usage == 0)
                 usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
         if (use == skg_use_static) {
-                VkBuffer       stage_buffer;
-                VkDeviceMemory stage_memory;
-                vk_create_buffer(size_bytes,
-                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                        &stage_buffer, &stage_memory);
-
-                void *gpu_data;
-                vkMapMemory(skg_device.device, stage_memory, 0, size_bytes, 0, &gpu_data);
-                if (data != nullptr) {
-                        memcpy(gpu_data, data, (size_t)size_bytes);
-                } else {
-                        memset(gpu_data, 0, (size_t)size_bytes);
-                }
-                vkUnmapMemory(skg_device.device, stage_memory);
+                VkBufferUsageFlags device_usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
                 vk_create_buffer(size_bytes,
-                        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-                        usage,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                        device_usage,
+                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         &result.buffer, &result.memory);
 
-                vk_copy_buffer(stage_buffer, result.buffer, size_bytes);
+                if (result.buffer != VK_NULL_HANDLE && result.memory != VK_NULL_HANDLE && size_bytes > 0) {
+                        VkBuffer       stage_buffer = VK_NULL_HANDLE;
+                        VkDeviceMemory stage_memory = VK_NULL_HANDLE;
+                        vk_create_buffer(size_bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                &stage_buffer, &stage_memory);
 
-                vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
-                vkFreeMemory(skg_device.device, stage_memory, nullptr);
+                        if (stage_buffer != VK_NULL_HANDLE && stage_memory != VK_NULL_HANDLE) {
+                                void *gpu_data = nullptr;
+                                if (vkMapMemory(skg_device.device, stage_memory, 0, size_bytes, 0, &gpu_data) == VK_SUCCESS && gpu_data != nullptr) {
+                                        if (data != nullptr)
+                                                memcpy(gpu_data, data, (size_t)size_bytes);
+                                        else
+                                                memset(gpu_data, 0, (size_t)size_bytes);
+                                        vkUnmapMemory(skg_device.device, stage_memory);
+                                        vk_copy_buffer(stage_buffer, result.buffer, size_bytes);
+                                } else {
+                                        skg_log(skg_log_critical, "Failed to map staging buffer for static Vulkan buffer upload");
+                                }
+
+                                vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
+                                vkFreeMemory  (skg_device.device, stage_memory, nullptr);
+                        } else {
+                                if (stage_buffer != VK_NULL_HANDLE)
+                                        vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
+                                if (stage_memory != VK_NULL_HANDLE)
+                                        vkFreeMemory  (skg_device.device, stage_memory, nullptr);
+                                skg_log(skg_log_critical, "Failed to allocate staging buffer for static Vulkan buffer");
+                        }
+                }
         } else {
                 vk_create_buffer(size_bytes,
                         usage,
@@ -5100,6 +5114,13 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
 
                 if (data != nullptr)
                         skg_buffer_set_contents(&result, data, size_bytes);
+                else if (size_bytes > 0 && result.memory != VK_NULL_HANDLE) {
+                        void *mapped = nullptr;
+                        if (vkMapMemory(skg_device.device, result.memory, 0, size_bytes, 0, &mapped) == VK_SUCCESS && mapped != nullptr) {
+                                memset(mapped, 0, (size_t)size_bytes);
+                                vkUnmapMemory(skg_device.device, result.memory);
+                        }
+                }
         }
 
         if (usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) {
@@ -5133,32 +5154,129 @@ bool skg_buffer_is_valid(const skg_buffer_t *buffer) {
 ///////////////////////////////////////////
 
 void skg_buffer_set_contents(skg_buffer_t *buffer, const void *data, uint32_t size_bytes) {
-        if (buffer->use != skg_use_dynamic)
+        if (buffer == nullptr || buffer->buffer == VK_NULL_HANDLE || buffer->memory == VK_NULL_HANDLE)
                 return;
 
-        void *gpu_data;
-        vkMapMemory(skg_device.device, buffer->memory, 0, size_bytes, 0, &gpu_data);
-        memcpy(gpu_data, data, (size_t)size_bytes);
-        vkUnmapMemory(skg_device.device, buffer->memory);
+        uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
+        uint32_t copy_size = size_bytes;
+        if (capacity != 0 && copy_size > capacity)
+                copy_size = (uint32_t)capacity;
+        if (copy_size == 0)
+                return;
+
+        void *mapped = nullptr;
+        VkResult map_result = vkMapMemory(skg_device.device, buffer->memory, 0, copy_size, 0, &mapped);
+        if (map_result == VK_SUCCESS && mapped != nullptr) {
+                if (data != nullptr)
+                        memcpy(mapped, data, copy_size);
+                else
+                        memset(mapped, 0, copy_size);
+                vkUnmapMemory(skg_device.device, buffer->memory);
+                return;
+        }
+
+        if (map_result == VK_SUCCESS)
+                vkUnmapMemory(skg_device.device, buffer->memory);
+
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+        vk_create_buffer(copy_size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_memory);
+        if (staging == VK_NULL_HANDLE || staging_memory == VK_NULL_HANDLE) {
+                if (staging != VK_NULL_HANDLE)
+                        vkDestroyBuffer(skg_device.device, staging, nullptr);
+                if (staging_memory != VK_NULL_HANDLE)
+                        vkFreeMemory(skg_device.device, staging_memory, nullptr);
+                skg_log(skg_log_critical, "Failed to allocate staging buffer for Vulkan upload");
+                return;
+        }
+
+        void *staging_ptr = nullptr;
+        if (vkMapMemory(skg_device.device, staging_memory, 0, copy_size, 0, &staging_ptr) != VK_SUCCESS || staging_ptr == nullptr) {
+                vkDestroyBuffer(skg_device.device, staging, nullptr);
+                vkFreeMemory  (skg_device.device, staging_memory, nullptr);
+                skg_log(skg_log_critical, "Failed to map staging buffer for Vulkan upload");
+                return;
+        }
+
+        if (data != nullptr)
+                memcpy(staging_ptr, data, copy_size);
+        else
+                memset(staging_ptr, 0, copy_size);
+        vkUnmapMemory(skg_device.device, staging_memory);
+
+        vk_copy_buffer(staging, buffer->buffer, copy_size);
+
+        vkDestroyBuffer(skg_device.device, staging, nullptr);
+        vkFreeMemory  (skg_device.device, staging_memory, nullptr);
 }
 
 ///////////////////////////////////////////
 
 void skg_buffer_get_contents(const skg_buffer_t *buffer, void *ref_buffer, uint32_t buffer_size) {
-        if (!buffer || buffer->memory == VK_NULL_HANDLE || ref_buffer == nullptr)
+        if (buffer == nullptr || buffer->buffer == VK_NULL_HANDLE || buffer->memory == VK_NULL_HANDLE || ref_buffer == nullptr)
                 return;
 
-        uint32_t available = buffer->stride * buffer->count;
-        if (buffer_size > available)
-                buffer_size = available;
-
-        void *mapped = nullptr;
-        if (vkMapMemory(skg_device.device, buffer->memory, 0, buffer_size, 0, &mapped) != VK_SUCCESS) {
+        uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
+        uint32_t copy_size = buffer_size;
+        if (capacity != 0 && copy_size > capacity)
+                copy_size = (uint32_t)capacity;
+        if (copy_size == 0) {
                 memset(ref_buffer, 0, buffer_size);
                 return;
         }
-        memcpy(ref_buffer, mapped, buffer_size);
-        vkUnmapMemory(skg_device.device, buffer->memory);
+
+        void *mapped = nullptr;
+        VkResult map_result = vkMapMemory(skg_device.device, buffer->memory, 0, copy_size, 0, &mapped);
+        if (map_result == VK_SUCCESS && mapped != nullptr) {
+                memcpy(ref_buffer, mapped, copy_size);
+                vkUnmapMemory(skg_device.device, buffer->memory);
+                if (buffer_size > copy_size)
+                        memset(((uint8_t*)ref_buffer) + copy_size, 0, buffer_size - copy_size);
+                return;
+        }
+
+        if (map_result == VK_SUCCESS)
+                vkUnmapMemory(skg_device.device, buffer->memory);
+
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+        vk_create_buffer(copy_size,
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                &staging, &staging_memory);
+        if (staging == VK_NULL_HANDLE || staging_memory == VK_NULL_HANDLE) {
+                if (staging != VK_NULL_HANDLE)
+                        vkDestroyBuffer(skg_device.device, staging, nullptr);
+                if (staging_memory != VK_NULL_HANDLE)
+                        vkFreeMemory(skg_device.device, staging_memory, nullptr);
+                memset(ref_buffer, 0, buffer_size);
+                skg_log(skg_log_critical, "Failed to allocate staging buffer for Vulkan readback");
+                return;
+        }
+
+        vk_copy_buffer(buffer->buffer, staging, copy_size);
+
+        void *staging_ptr = nullptr;
+        if (vkMapMemory(skg_device.device, staging_memory, 0, copy_size, 0, &staging_ptr) != VK_SUCCESS || staging_ptr == nullptr) {
+                memset(ref_buffer, 0, buffer_size);
+                if (staging_ptr != nullptr)
+                        vkUnmapMemory(skg_device.device, staging_memory);
+                vkDestroyBuffer(skg_device.device, staging, nullptr);
+                vkFreeMemory  (skg_device.device, staging_memory, nullptr);
+                skg_log(skg_log_critical, "Failed to map staging buffer for Vulkan readback");
+                return;
+        }
+
+        memcpy(ref_buffer, staging_ptr, copy_size);
+        if (buffer_size > copy_size)
+                memset(((uint8_t*)ref_buffer) + copy_size, 0, buffer_size - copy_size);
+        vkUnmapMemory(skg_device.device, staging_memory);
+
+        vkDestroyBuffer(skg_device.device, staging, nullptr);
+        vkFreeMemory  (skg_device.device, staging_memory, nullptr);
 }
 
 ///////////////////////////////////////////

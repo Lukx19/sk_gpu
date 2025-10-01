@@ -1671,33 +1671,44 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
                 usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 
         if (use == skg_use_static) {
-                VkBuffer       stage_buffer;
-                VkDeviceMemory stage_memory;
-                vk_create_buffer(size_bytes,
-                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                        &stage_buffer, &stage_memory);
-
-                void *gpu_data;
-                vkMapMemory(skg_device.device, stage_memory, 0, size_bytes, 0, &gpu_data);
-                if (data != nullptr) {
-                        memcpy(gpu_data, data, (size_t)size_bytes);
-                } else {
-                        memset(gpu_data, 0, (size_t)size_bytes);
-                }
-                vkUnmapMemory(skg_device.device, stage_memory);
-
                 VkBufferUsageFlags device_usage = usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
                 vk_create_buffer(size_bytes,
                         device_usage,
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         &result.buffer, &result.memory);
 
-                vk_copy_buffer(stage_buffer, result.buffer, size_bytes);
+                if (result.buffer != VK_NULL_HANDLE && result.memory != VK_NULL_HANDLE && size_bytes > 0) {
+                        VkBuffer       stage_buffer = VK_NULL_HANDLE;
+                        VkDeviceMemory stage_memory = VK_NULL_HANDLE;
+                        vk_create_buffer(size_bytes,
+                                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                &stage_buffer, &stage_memory);
 
-                vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
-                vkFreeMemory(skg_device.device, stage_memory, nullptr);
+                        if (stage_buffer != VK_NULL_HANDLE && stage_memory != VK_NULL_HANDLE) {
+                                void *gpu_data = nullptr;
+                                if (vkMapMemory(skg_device.device, stage_memory, 0, size_bytes, 0, &gpu_data) == VK_SUCCESS && gpu_data != nullptr) {
+                                        if (data != nullptr)
+                                                memcpy(gpu_data, data, (size_t)size_bytes);
+                                        else
+                                                memset(gpu_data, 0, (size_t)size_bytes);
+                                        vkUnmapMemory(skg_device.device, stage_memory);
+                                        vk_copy_buffer(stage_buffer, result.buffer, size_bytes);
+                                } else {
+                                        skg_log(skg_log_critical, "Failed to map staging buffer for static Vulkan buffer upload");
+                                }
+
+                                vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
+                                vkFreeMemory  (skg_device.device, stage_memory, nullptr);
+                        } else {
+                                if (stage_buffer != VK_NULL_HANDLE)
+                                        vkDestroyBuffer(skg_device.device, stage_buffer, nullptr);
+                                if (stage_memory != VK_NULL_HANDLE)
+                                        vkFreeMemory  (skg_device.device, stage_memory, nullptr);
+                                skg_log(skg_log_critical, "Failed to allocate staging buffer for static Vulkan buffer");
+                        }
+                }
         } else {
                 vk_create_buffer(size_bytes,
                         usage,
@@ -1707,6 +1718,13 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
 
                 if (data != nullptr)
                         skg_buffer_set_contents(&result, data, size_bytes);
+                else if (size_bytes > 0 && result.memory != VK_NULL_HANDLE) {
+                        void *mapped = nullptr;
+                        if (vkMapMemory(skg_device.device, result.memory, 0, size_bytes, 0, &mapped) == VK_SUCCESS && mapped != nullptr) {
+                                memset(mapped, 0, (size_t)size_bytes);
+                                vkUnmapMemory(skg_device.device, result.memory);
+                        }
+                }
         }
 
         if (usage & VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT) {
