@@ -124,6 +124,7 @@ static void vk_set_debug_name(VkObjectType type, uint64_t handle, const char *na
 static void vk_shader_apply_debug_name(skg_shader_t *shader);
 static void vk_pipeline_apply_debug_name(skg_pipeline_t *pipeline);
 static void vk_tex_apply_debug_name(skg_tex_t *tex);
+static bool vk_tex_configure_render_target(skg_tex_t *tex, skg_tex_t *depth);
 
 //////////////////////////////////////
 
@@ -1325,6 +1326,139 @@ void skg_tex_target_discard(skg_tex_t *render_target) {
         render_target->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
+static bool vk_tex_configure_render_target(skg_tex_t *tex, skg_tex_t *depth) {
+        if (tex == nullptr)
+                return false;
+        if (tex->type != skg_tex_type_rendertarget) {
+                skg_log(skg_log_warning, "Only color render targets can be bound for Vulkan framebuffers");
+                return false;
+        }
+
+        if (tex->rt_framebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(skg_device.device, tex->rt_framebuffer, nullptr);
+                tex->rt_framebuffer = VK_NULL_HANDLE;
+        }
+        if (tex->rt_renderpass >= 0) {
+                vk_renderpass_release(tex->rt_renderpass);
+                tex->rt_renderpass = -1;
+        }
+
+        if (tex->view == VK_NULL_HANDLE) {
+                skg_log(skg_log_warning, "Render target lacks an image view for Vulkan framebuffer binding");
+                return false;
+        }
+
+        bool has_depth = depth != nullptr && depth->view != VK_NULL_HANDLE;
+
+        VkAttachmentDescription attachments[2] = {};
+        uint32_t attachment_count = 0;
+
+        VkImageLayout color_final_layout = tex->texture_mem == VK_NULL_HANDLE
+                ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
+                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+        attachments[attachment_count].format         = (VkFormat)skg_tex_fmt_to_native(tex->format);
+        attachments[attachment_count].samples        = VK_SAMPLE_COUNT_1_BIT;
+        attachments[attachment_count].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[attachment_count].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[attachment_count].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[attachment_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[attachment_count].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[attachment_count].finalLayout    = color_final_layout;
+        attachment_count += 1;
+
+        VkAttachmentReference color_ref = {};
+        color_ref.attachment = 0;
+        color_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference depth_ref = {};
+        if (has_depth) {
+                attachments[attachment_count].format         = (VkFormat)skg_tex_fmt_to_native(depth->format);
+                attachments[attachment_count].samples        = VK_SAMPLE_COUNT_1_BIT;
+                attachments[attachment_count].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                attachments[attachment_count].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachments[attachment_count].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachments[attachment_count].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                attachments[attachment_count].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+                attachments[attachment_count].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depth_ref.attachment = 1;
+                depth_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                attachment_count += 1;
+        }
+
+        VkSubpassDescription subpass = {};
+        subpass.pipelineBindPoint    = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments    = &color_ref;
+        subpass.pDepthStencilAttachment = has_depth ? &depth_ref : nullptr;
+
+        VkSubpassDependency dependency = {};
+        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass = 0;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        if (has_depth) {
+                dependency.srcStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+                dependency.dstStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+                dependency.dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        }
+
+        VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        pass_info.attachmentCount = attachment_count;
+        pass_info.pAttachments    = attachments;
+        pass_info.subpassCount    = 1;
+        pass_info.pSubpasses      = &subpass;
+        pass_info.dependencyCount = 1;
+        pass_info.pDependencies   = &dependency;
+
+        tex->rt_renderpass = vk_renderpass_ref(pass_info);
+        if (tex->rt_renderpass < 0) {
+                skg_log(skg_log_critical, "Failed to build Vulkan render pass for render target");
+                return false;
+        }
+
+        VkImageView attachment_views[2] = { tex->view, has_depth ? depth->view : VK_NULL_HANDLE };
+        uint32_t view_count = has_depth ? 2u : 1u;
+
+        VkFramebufferCreateInfo framebuffer_info = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        framebuffer_info.renderPass      = vk_renderpass_cache[tex->rt_renderpass].renderpass;
+        framebuffer_info.attachmentCount = view_count;
+        framebuffer_info.pAttachments    = attachment_views;
+        framebuffer_info.width           = tex->width;
+        framebuffer_info.height          = tex->height;
+        framebuffer_info.layers          = 1;
+
+        if (vkCreateFramebuffer(skg_device.device, &framebuffer_info, nullptr, &tex->rt_framebuffer) != VK_SUCCESS) {
+                vk_renderpass_release(tex->rt_renderpass);
+                tex->rt_renderpass = -1;
+                skg_log(skg_log_critical, "Failed to create Vulkan framebuffer for render target");
+                return false;
+        }
+
+        tex->rt_depth_view = has_depth ? depth->view : VK_NULL_HANDLE;
+        tex->rt_depth_tex  = has_depth ? depth : nullptr;
+
+        if (tex->rt_commandbuffer == VK_NULL_HANDLE) {
+                VkCommandBufferAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+                alloc_info.commandPool        = vk_cmd_pool;
+                alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+                alloc_info.commandBufferCount = 1;
+                if (vkAllocateCommandBuffers(skg_device.device, &alloc_info, &tex->rt_commandbuffer) != VK_SUCCESS) {
+                        vkDestroyFramebuffer(skg_device.device, tex->rt_framebuffer, nullptr);
+                        tex->rt_framebuffer = VK_NULL_HANDLE;
+                        vk_renderpass_release(tex->rt_renderpass);
+                        tex->rt_renderpass = -1;
+                        skg_log(skg_log_critical, "Failed to allocate Vulkan command buffer for render target");
+                        return false;
+                }
+        }
+
+        vk_tex_apply_debug_name(tex);
+        return true;
+}
+
 ///////////////////////////////////////////
 
 void skg_tex_target_bind(float clear_color[4], const skg_tex_t *render_target, const skg_tex_t *depth_target) {
@@ -1332,13 +1466,10 @@ void skg_tex_target_bind(float clear_color[4], const skg_tex_t *render_target, c
                 return;
 
         skg_tex_t *mutable_target = (skg_tex_t *)render_target;
-        if (mutable_target->rt_renderpass < 0) {
-                if (depth_target != nullptr)
-                        skg_tex_attach_depth(mutable_target, (skg_tex_t *)depth_target);
-                else
+        skg_tex_t *mutable_depth  = (skg_tex_t *)depth_target;
+        if (mutable_target->rt_renderpass < 0 || mutable_target->rt_depth_tex != mutable_depth) {
+                if (!vk_tex_configure_render_target(mutable_target, mutable_depth))
                         return;
-        } else if (depth_target != nullptr && mutable_target->rt_depth_view != depth_target->view) {
-                skg_tex_attach_depth(mutable_target, (skg_tex_t *)depth_target);
         }
 
         skg_active_rendertarget = mutable_target;
@@ -1712,6 +1843,7 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
                         device_usage,
                         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                         &result.buffer, &result.memory);
+                result.memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
                 if (result.buffer != VK_NULL_HANDLE && result.memory != VK_NULL_HANDLE && size_bytes > 0) {
                         VkBuffer       stage_buffer = VK_NULL_HANDLE;
@@ -1750,6 +1882,7 @@ skg_buffer_t skg_buffer_create(const void *data, uint32_t size_count, uint32_t s
                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                         &result.buffer, &result.memory);
+                result.memory_properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
                 if (data != nullptr)
                         skg_buffer_set_contents(&result, data, size_bytes);
@@ -3394,97 +3527,8 @@ void skg_tex_attach_depth(skg_tex_t *tex, skg_tex_t *depth) {
                 skg_log(skg_log_warning, "Depth attachment must be a depth texture");
                 return;
         }
-
-        if (tex->rt_framebuffer != VK_NULL_HANDLE) {
-                vkDestroyFramebuffer(skg_device.device, tex->rt_framebuffer, nullptr);
-                tex->rt_framebuffer = VK_NULL_HANDLE;
-        }
-        if (tex->rt_renderpass >= 0) {
-                vk_renderpass_release(tex->rt_renderpass);
-                tex->rt_renderpass = -1;
-        }
-
-        VkAttachmentDescription attachments[2] = {};
-        VkImageLayout color_final_layout = tex->texture_mem == VK_NULL_HANDLE
-                ? VK_IMAGE_LAYOUT_PRESENT_SRC_KHR
-                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-        attachments[0].format         = (VkFormat)skg_tex_fmt_to_native(tex->format);
-        attachments[0].samples        = VK_SAMPLE_COUNT_1_BIT;
-        attachments[0].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[0].storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
-        attachments[0].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[0].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[0].finalLayout    = color_final_layout;
-
-        attachments[1].format         = (VkFormat)skg_tex_fmt_to_native(depth->format);
-        attachments[1].samples        = VK_SAMPLE_COUNT_1_BIT;
-        attachments[1].loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachments[1].storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachments[1].initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachments[1].finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference color_ref = {};
-        color_ref.attachment = 0;
-        color_ref.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-        VkAttachmentReference depth_ref = {};
-        depth_ref.attachment = 1;
-        depth_ref.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-        VkSubpassDescription subpass = {};
-        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount    = 1;
-        subpass.pColorAttachments       = &color_ref;
-        subpass.pDepthStencilAttachment = &depth_ref;
-
-        VkSubpassDependency dependency = {};
-        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass    = 0;
-        dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-
-        VkRenderPassCreateInfo pass_info = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
-        pass_info.attachmentCount = _countof(attachments);
-        pass_info.pAttachments    = attachments;
-        pass_info.subpassCount    = 1;
-        pass_info.pSubpasses      = &subpass;
-        pass_info.dependencyCount = 1;
-        pass_info.pDependencies   = &dependency;
-
-        tex->rt_renderpass = vk_renderpass_ref(pass_info);
-
-        VkImageView attachment_views[] = { tex->view, depth->view };
-        VkFramebufferCreateInfo framebuffer_info = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        framebuffer_info.renderPass      = vk_renderpass_cache[tex->rt_renderpass].renderpass;
-        framebuffer_info.attachmentCount = _countof(attachment_views);
-        framebuffer_info.pAttachments    = attachment_views;
-        framebuffer_info.width           = tex->width;
-        framebuffer_info.height          = tex->height;
-        framebuffer_info.layers          = 1;
-
-        if (vkCreateFramebuffer(skg_device.device, &framebuffer_info, nullptr, &tex->rt_framebuffer) != VK_SUCCESS) {
-                tex->rt_framebuffer = VK_NULL_HANDLE;
-                skg_log(skg_log_critical, "failed to create framebuffer with depth attachment");
-        }
-
-        tex->rt_depth_view = depth->view;
-        tex->rt_depth_tex  = depth;
-
-        if (tex->rt_commandbuffer == VK_NULL_HANDLE) {
-                VkCommandBufferAllocateInfo alloc_info = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
-                alloc_info.commandPool        = vk_cmd_pool;
-                alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-                alloc_info.commandBufferCount = 1;
-                vkAllocateCommandBuffers(skg_device.device, &alloc_info, &tex->rt_commandbuffer);
-        }
-
-        vk_tex_apply_debug_name(tex);
+        if (!vk_tex_configure_render_target(tex, depth))
+                skg_log(skg_log_warning, "Failed to attach depth buffer to Vulkan render target");
 }
 skg_tex_t            skg_tex_create(skg_tex_type_ type, skg_use_ use, skg_tex_fmt_ format, skg_mip_ mip_maps) {
         skg_tex_t result = {};

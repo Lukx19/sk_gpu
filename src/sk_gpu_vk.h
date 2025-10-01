@@ -22,6 +22,7 @@ typedef struct skg_buffer_t {
         uint32_t               count;
         VkBuffer               buffer;
         VkDeviceMemory         memory;
+        VkMemoryPropertyFlags  memory_properties;
         VkDescriptorBufferInfo descriptor_uniform;
         VkDescriptorBufferInfo descriptor_storage;
 };
