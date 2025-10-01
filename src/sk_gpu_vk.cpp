@@ -1763,8 +1763,10 @@ void skg_buffer_set_contents(skg_buffer_t *buffer, const void *data, uint32_t si
 
         uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
         uint32_t copy_size = size_bytes;
-        if (capacity != 0 && copy_size > capacity)
+        if (capacity != 0 && copy_size > capacity) {
+                skg_logf(skg_log_warning, "Truncating Vulkan buffer upload from %u to %u bytes", size_bytes, (uint32_t)capacity);
                 copy_size = (uint32_t)capacity;
+        }
         if (copy_size == 0)
                 return;
 
@@ -1781,6 +1783,8 @@ void skg_buffer_set_contents(skg_buffer_t *buffer, const void *data, uint32_t si
 
         if (map_result == VK_SUCCESS)
                 vkUnmapMemory(skg_device.device, buffer->memory);
+        else
+                skg_log(skg_log_warning, "Vulkan buffer not host-visible; staging upload required");
 
         VkBuffer staging = VK_NULL_HANDLE;
         VkDeviceMemory staging_memory = VK_NULL_HANDLE;
@@ -1825,8 +1829,10 @@ void skg_buffer_get_contents(const skg_buffer_t *buffer, void *ref_buffer, uint3
 
         uint64_t capacity = (uint64_t)buffer->stride * (uint64_t)buffer->count;
         uint32_t copy_size = buffer_size;
-        if (capacity != 0 && copy_size > capacity)
+        if (capacity != 0 && copy_size > capacity) {
+                skg_logf(skg_log_warning, "Truncating Vulkan buffer readback from %u to %u bytes", buffer_size, (uint32_t)capacity);
                 copy_size = (uint32_t)capacity;
+        }
         if (copy_size == 0) {
                 memset(ref_buffer, 0, buffer_size);
                 return;
@@ -1844,6 +1850,8 @@ void skg_buffer_get_contents(const skg_buffer_t *buffer, void *ref_buffer, uint3
 
         if (map_result == VK_SUCCESS)
                 vkUnmapMemory(skg_device.device, buffer->memory);
+        else
+                skg_log(skg_log_warning, "Vulkan buffer not host-visible; staging readback required");
 
         VkBuffer staging = VK_NULL_HANDLE;
         VkDeviceMemory staging_memory = VK_NULL_HANDLE;
