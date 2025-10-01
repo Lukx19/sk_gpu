@@ -148,6 +148,17 @@ VkPhysicalDeviceFeatures    vk_device_features   = {};
 VkPhysicalDeviceProperties  vk_device_properties = {};
 static char *vk_adapter_name = nullptr;
 
+struct {
+        bool tiled_multisample;
+        bool discard_framebuffer;
+        bool fmt_pvrtc1;
+        bool fmt_pvrtc2;
+        bool fmt_astc;
+        bool fmt_atc;
+        bool multiview;
+        bool multiview_tiled_msaa;
+} vk_device_caps = {};
+
 //////////////////////////////////////
 // Pipeline & Renderpass Info       //
 //////////////////////////////////////
@@ -682,10 +693,50 @@ bool vk_create_device(VkInstance inst, void *app_hwnd, skg_device_t *out_device)
         }
 
         bool has_swapchain_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_KHR_SWAPCHAIN_EXTENSION_NAME);
-        bool has_debug_utils    = vk_extension_supported(device_ext_props, device_ext_count, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        bool has_debug_utils   = vk_extension_supported(device_ext_props, device_ext_count, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+#if defined(VK_EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_EXTENSION_NAME)
+        bool has_render_to_single = vk_extension_supported(device_ext_props, device_ext_count, VK_EXT_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_EXTENSION_NAME);
+#else
+        bool has_render_to_single = vk_extension_supported(device_ext_props, device_ext_count, "VK_EXT_multisampled_render_to_single_sampled");
+#endif
+#if defined(VK_KHR_MULTIVIEW_EXTENSION_NAME)
+        bool has_multiview_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_KHR_MULTIVIEW_EXTENSION_NAME);
+#else
+        bool has_multiview_ext = vk_extension_supported(device_ext_props, device_ext_count, "VK_KHR_multiview");
+#endif
+#if defined(VK_IMG_FORMAT_PVRTC_EXTENSION_NAME)
+        bool has_pvrtc_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_IMG_FORMAT_PVRTC_EXTENSION_NAME);
+#else
+        bool has_pvrtc_ext = vk_extension_supported(device_ext_props, device_ext_count, "VK_IMG_format_pvrtc");
+#endif
+#if defined(VK_AMD_TEXTURE_COMPRESSION_ATC_EXTENSION_NAME)
+        bool has_atc_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_AMD_TEXTURE_COMPRESSION_ATC_EXTENSION_NAME);
+#else
+        bool has_atc_ext = vk_extension_supported(device_ext_props, device_ext_count, "VK_AMD_texture_compression_ATC");
+#endif
+#if defined(VK_KHR_TEXTURE_COMPRESSION_ASTC_LDR_EXTENSION_NAME)
+        bool has_astc_ext = vk_extension_supported(device_ext_props, device_ext_count, VK_KHR_TEXTURE_COMPRESSION_ASTC_LDR_EXTENSION_NAME);
+#else
+        bool has_astc_ext = vk_extension_supported(device_ext_props, device_ext_count, "VK_KHR_texture_compression_astc_ldr");
+#endif
         if (device_ext_props) free(device_ext_props);
         if (!has_swapchain_ext)
                 return false;
+
+        vk_device_caps.tiled_multisample      = has_render_to_single;
+        vk_device_caps.discard_framebuffer    = true;
+        vk_device_caps.fmt_pvrtc1             = has_pvrtc_ext;
+        vk_device_caps.fmt_pvrtc2             = has_pvrtc_ext;
+        vk_device_caps.fmt_atc                = has_atc_ext;
+        vk_device_caps.multiview              = has_multiview_ext;
+        vk_device_caps.multiview_tiled_msaa   = has_multiview_ext && has_render_to_single;
+
+        VkFormatProperties astc_unorm = {};
+        VkFormatProperties astc_srgb  = {};
+        vkGetPhysicalDeviceFormatProperties(out_device->phys_device, VK_FORMAT_ASTC_4x4_UNORM_BLOCK, &astc_unorm);
+        vkGetPhysicalDeviceFormatProperties(out_device->phys_device, VK_FORMAT_ASTC_4x4_SRGB_BLOCK,  &astc_srgb);
+        VkFormatFeatureFlags astc_features = astc_unorm.optimalTilingFeatures | astc_srgb.optimalTilingFeatures;
+        vk_device_caps.fmt_astc = has_astc_ext || (astc_features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
 
         array_t<const char*> enabled_exts = {};
         enabled_exts.add(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
@@ -1095,9 +1146,17 @@ skg_platform_data_t skg_get_platform_data() {
 
 bool skg_capability(skg_cap_ capability) {
         switch (capability) {
-        case skg_cap_tex_layer_select: return vk_device_features.shaderOutputLayer == VK_TRUE;
-        case skg_cap_wireframe:        return vk_device_features.fillModeNonSolid == VK_TRUE;
-        default:                       return false; // TODO: query format/multiview capabilities.
+        case skg_cap_tex_layer_select:           return vk_device_features.shaderOutputLayer == VK_TRUE;
+        case skg_cap_wireframe:                  return vk_device_features.fillModeNonSolid == VK_TRUE;
+        case skg_cap_tiled_multisample:          return vk_device_caps.tiled_multisample;
+        case skg_cap_discard_framebuffer:        return vk_device_caps.discard_framebuffer;
+        case skg_cap_fmt_pvrtc1:                 return vk_device_caps.fmt_pvrtc1;
+        case skg_cap_fmt_pvrtc2:                 return vk_device_caps.fmt_pvrtc2;
+        case skg_cap_fmt_astc:                   return vk_device_caps.fmt_astc;
+        case skg_cap_fmt_atc:                    return vk_device_caps.fmt_atc;
+        case skg_cap_multiview:                  return vk_device_caps.multiview;
+        case skg_cap_multiview_tiled_multisample:return vk_device_caps.multiview_tiled_msaa;
+        default:                                 return false;
         }
 }
 
@@ -1216,9 +1275,47 @@ void skg_target_clear(bool depth, const float *clear_color_4) {
 ///////////////////////////////////////////
 
 void skg_tex_target_discard(skg_tex_t *render_target) {
-        // TODO: Provide an explicit discard/invalidate path so tile-based GPUs can
-        // skip resolves once the render target lifecycle is tracked on Vulkan.
-        (void)render_target;
+        if (render_target == nullptr)
+                return;
+        if (render_target->texture == VK_NULL_HANDLE) {
+                render_target->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+                return;
+        }
+
+        VkImageLayout current_layout = render_target->layout != VK_IMAGE_LAYOUT_UNDEFINED
+                ? render_target->layout
+                : vk_target_layout_for_tex(render_target);
+        VkImageAspectFlags aspect = vk_aspect_from_format(render_target->format);
+        uint32_t mip_levels = render_target->mip_count   > 0 ? render_target->mip_count   : 1u;
+        uint32_t layers     = render_target->array_count > 0 ? render_target->array_count : 1u;
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        bool transitioned = false;
+        if (skg_active_rendertarget != nullptr) {
+                if (skg_active_rendertarget == render_target) {
+                        cmd = render_target->rt_commandbuffer;
+                        transitioned = cmd != VK_NULL_HANDLE;
+                } else if (skg_active_rendertarget->rt_depth_tex == render_target) {
+                        cmd = skg_active_rendertarget->rt_commandbuffer;
+                        transitioned = cmd != VK_NULL_HANDLE;
+                }
+        }
+
+        if (cmd != VK_NULL_HANDLE) {
+                vk_transition_image(cmd, render_target->texture, current_layout, VK_IMAGE_LAYOUT_UNDEFINED, aspect, mip_levels, layers);
+        } else {
+                cmd = vk_begin_transient_cmd();
+                if (cmd != VK_NULL_HANDLE) {
+                        vk_transition_image(cmd, render_target->texture, current_layout, VK_IMAGE_LAYOUT_UNDEFINED, aspect, mip_levels, layers);
+                        vk_end_transient_cmd(cmd);
+                        transitioned = true;
+                }
+        }
+
+        if (!transitioned)
+                return;
+
+        render_target->layout = VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
 ///////////////////////////////////////////
