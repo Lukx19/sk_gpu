@@ -423,6 +423,7 @@ static VkImageView    vk_dummy_image_view     = VK_NULL_HANDLE;
 static VkSampler      vk_dummy_sampler        = VK_NULL_HANDLE;
 static VkDescriptorImageInfo vk_dummy_texture_info = {};
 static VkDescriptorImageInfo vk_dummy_storage_image_info = {};
+static VkFence        vk_transient_fence      = VK_NULL_HANDLE;
 
 static void vk_mark_descriptor_dirty(uint32_t stage_bits) {
         if (stage_bits & (skg_stage_vertex | skg_stage_pixel))
@@ -1083,6 +1084,10 @@ void skg_shutdown() {
                 vkFreeMemory(skg_device.device, vk_dummy_image_memory, nullptr);
                 vk_dummy_image_memory = VK_NULL_HANDLE;
         }
+        if (vk_transient_fence != VK_NULL_HANDLE) {
+                vkDestroyFence(skg_device.device, vk_transient_fence, nullptr);
+                vk_transient_fence = VK_NULL_HANDLE;
+        }
         vk_dummy_texture_info = {};
         vk_dummy_storage_image_info = {};
         if (vk_descriptor_pool)   vkDestroyDescriptorPool  (skg_device.device, vk_descriptor_pool,   nullptr);
@@ -1461,10 +1466,9 @@ void skg_compute(uint32_t thread_count_x, uint32_t thread_count_y, uint32_t thre
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers    = &cmd;
 
-        if (vkQueueSubmit(skg_device.queue_gfx, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS) {
+        if (!vk_submit_and_wait(&submit_info)) {
                 skg_log(skg_log_critical, "Failed to submit compute work");
         }
-        vkQueueWaitIdle(skg_device.queue_gfx);
 
         vkFreeCommandBuffers(skg_device.device, vk_cmd_pool_transient, 1, &cmd);
 }
@@ -1485,34 +1489,66 @@ int32_t vk_find_mem_type(uint32_t type_filter, VkMemoryPropertyFlags properties)
 }
 
 void vk_create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkBuffer *out_buffer, VkDeviceMemory *out_memory) {
-	VkBufferCreateInfo buff_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-	buff_info.size        = size;
-	buff_info.usage       = usage;
-	buff_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkBufferCreateInfo buff_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        buff_info.size        = size;
+        buff_info.usage       = usage;
+        buff_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-	if (vkCreateBuffer(skg_device.device, &buff_info, nullptr, out_buffer) != VK_SUCCESS) {
-		skg_log(skg_log_critical, "failed to create buffer!");
-	}
+        if (vkCreateBuffer(skg_device.device, &buff_info, nullptr, out_buffer) != VK_SUCCESS) {
+                skg_log(skg_log_critical, "failed to create buffer!");
+        }
 
-	VkMemoryRequirements memRequirements;
-	vkGetBufferMemoryRequirements(skg_device.device, *out_buffer, &memRequirements);
+        VkMemoryRequirements memRequirements;
+        vkGetBufferMemoryRequirements(skg_device.device, *out_buffer, &memRequirements);
 
-	VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-	allocInfo.allocationSize  = memRequirements.size;
-	allocInfo.memoryTypeIndex = vk_find_mem_type(memRequirements.memoryTypeBits, properties);
+        VkMemoryAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        allocInfo.allocationSize  = memRequirements.size;
+        allocInfo.memoryTypeIndex = vk_find_mem_type(memRequirements.memoryTypeBits, properties);
 
-	if (vkAllocateMemory(skg_device.device, &allocInfo, nullptr, out_memory) != VK_SUCCESS) {
-		skg_log(skg_log_critical, "failed to allocate buffer memory!");
-	}
+        if (vkAllocateMemory(skg_device.device, &allocInfo, nullptr, out_memory) != VK_SUCCESS) {
+                skg_log(skg_log_critical, "failed to allocate buffer memory!");
+        }
 
-	vkBindBufferMemory(skg_device.device, *out_buffer, *out_memory, 0);
+        vkBindBufferMemory(skg_device.device, *out_buffer, *out_memory, 0);
+}
+
+static bool vk_ensure_transient_fence() {
+        if (vk_transient_fence != VK_NULL_HANDLE)
+                return true;
+
+        VkFenceCreateInfo fence_info = { VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (vkCreateFence(skg_device.device, &fence_info, nullptr, &vk_transient_fence) != VK_SUCCESS) {
+                skg_log(skg_log_critical, "Failed to create transient synchronization fence");
+                return false;
+        }
+        return true;
+}
+
+static bool vk_submit_and_wait(const VkSubmitInfo *submit_info) {
+        if (submit_info == nullptr)
+                return false;
+        if (!vk_ensure_transient_fence())
+                return false;
+
+        vkResetFences(skg_device.device, 1, &vk_transient_fence);
+        if (vkQueueSubmit(skg_device.queue_gfx, 1, submit_info, vk_transient_fence) != VK_SUCCESS) {
+                skg_log(skg_log_critical, "Failed to submit Vulkan work");
+                return false;
+        }
+
+        VkResult wait_result = vkWaitForFences(skg_device.device, 1, &vk_transient_fence, VK_TRUE, UINT64_MAX);
+        if (wait_result != VK_SUCCESS) {
+                skg_log(skg_log_critical, "Failed waiting for Vulkan work to complete");
+                return false;
+        }
+        return true;
 }
 
 void vk_copy_buffer(VkBuffer src, VkBuffer dest, VkDeviceSize size) {
-	VkCommandBufferAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-	allocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandPool        = vk_cmd_pool_transient;
-	allocInfo.commandBufferCount = 1;
+        VkCommandBufferAllocateInfo allocInfo = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandPool        = vk_cmd_pool_transient;
+        allocInfo.commandBufferCount = 1;
 
 	VkCommandBuffer commandBuffer;
 	vkAllocateCommandBuffers(skg_device.device, &allocInfo, &commandBuffer);
@@ -1528,14 +1564,13 @@ void vk_copy_buffer(VkBuffer src, VkBuffer dest, VkDeviceSize size) {
 
 	vkEndCommandBuffer(commandBuffer);
 
-	VkSubmitInfo submitInfo{};
-	submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &commandBuffer;
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &commandBuffer;
 
-	vkQueueSubmit  (skg_device.queue_gfx, 1, &submitInfo, VK_NULL_HANDLE);
-	vkQueueWaitIdle(skg_device.queue_gfx);
-	vkFreeCommandBuffers(skg_device.device, vk_cmd_pool_transient, 1, &commandBuffer);
+        vk_submit_and_wait(&submitInfo);
+        vkFreeCommandBuffers(skg_device.device, vk_cmd_pool_transient, 1, &commandBuffer);
 }
 
 static VkCommandBuffer vk_begin_transient_cmd() {
@@ -1565,8 +1600,7 @@ static void vk_end_transient_cmd(VkCommandBuffer cmd) {
         VkSubmitInfo submit_info = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
         submit_info.commandBufferCount = 1;
         submit_info.pCommandBuffers    = &cmd;
-        vkQueueSubmit  (skg_device.queue_gfx, 1, &submit_info, VK_NULL_HANDLE);
-        vkQueueWaitIdle(skg_device.queue_gfx);
+        vk_submit_and_wait(&submit_info);
 
         vkFreeCommandBuffers(skg_device.device, vk_cmd_pool_transient, 1, &cmd);
 }
