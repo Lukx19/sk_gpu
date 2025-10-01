@@ -1786,6 +1786,8 @@ void skg_buffer_clear(skg_bind_t bind) {
         vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
+        if (bind.stage_bits & skg_stage_compute)
+                vk_flush_descriptor_binding_compute(skg_active_rendertarget ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE);
 }
 
 ///////////////////////////////////////////
@@ -3939,6 +3941,8 @@ void skg_tex_clear(skg_bind_t bind) {
         vk_mark_descriptor_dirty(bind.stage_bits);
         if (bind.stage_bits & (skg_stage_vertex | skg_stage_pixel))
                 vk_flush_descriptor_binding_graphics();
+        if (bind.stage_bits & skg_stage_compute)
+                vk_flush_descriptor_binding_compute(skg_active_rendertarget ? skg_active_rendertarget->rt_commandbuffer : VK_NULL_HANDLE);
 }
 
 void skg_tex_bind(const skg_tex_t *tex, skg_bind_t bind) {
