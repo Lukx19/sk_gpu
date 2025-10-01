@@ -13,6 +13,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <array>
+
 ///////////////////////////////////////////
 
 typedef struct skg_buffer_t {
@@ -114,9 +116,9 @@ typedef struct skg_swapchain_t {
         skg_tex_fmt_       color_format;
         skg_tex_fmt_       depth_format;
 
-        VkSemaphore sem_available[2];
-        VkSemaphore sem_finished[2];
-        VkFence     fence_flight[2];
+        std::array<VkSemaphore, 2> sem_available;
+        std::array<VkSemaphore, 2> sem_finished;
+        std::array<VkFence,     2> fence_flight;
         int32_t     sync_index;
 } skg_swapchain_t;
 
