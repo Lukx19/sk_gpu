@@ -37,6 +37,8 @@ sk_gpu.h
 #define SKG_DIRECT3D11
 #elif defined( SKG_FORCE_OPENGL )
 #define SKG_OPENGL
+#elif defined( SKG_FORCE_VULKAN )
+#define SKG_VULKAN
 #elif defined( _WIN32 )
 #define SKG_DIRECT3D11
 #else
@@ -412,7 +414,7 @@ typedef struct skg_shader_meta_t {
 ///////////////////////////////////////////
 
 SKG_API void                skg_setup_xlib               (void *dpy, void *vi, void *fbconfig, void *drawable);
-SKG_API int32_t             skg_init                     (const char *app_name, void *adapter_id);
+SKG_API int32_t             skg_init                     (const char *app_name, void *app_hwnd, void *adapter_id);
 SKG_API const char*         skg_adapter_name             ();
 SKG_API void                skg_shutdown                 ();
 SKG_API void                skg_callback_log             (void (*callback)(skg_log_ level, const char *text));
@@ -494,6 +496,9 @@ SKG_API skg_tex_t           skg_tex_create_from_existing (void *native_tex, skg_
 SKG_API skg_tex_t           skg_tex_create_from_layer    (void *native_tex, skg_tex_type_ type, skg_tex_fmt_ format, int32_t width, int32_t height, int32_t array_layer);
 SKG_API skg_tex_t           skg_tex_create               (skg_tex_type_ type, skg_use_ use, skg_tex_fmt_ format, skg_mip_ mip_maps);
 SKG_API void                skg_tex_name                 (      skg_tex_t *tex, const char* name);
+#if defined(SKG_VULKAN)
+SKG_API skg_tex_t*          skg_tex_find                 (const char *name);
+#endif
 SKG_API bool                skg_tex_is_valid             (const skg_tex_t *tex);
 SKG_API void                skg_tex_copy_to              (const skg_tex_t *tex, int32_t tex_surface, skg_tex_t *destination, int32_t dest_surface);
 SKG_API void                skg_tex_copy_to_swapchain    (const skg_tex_t *tex, skg_swapchain_t *destination);

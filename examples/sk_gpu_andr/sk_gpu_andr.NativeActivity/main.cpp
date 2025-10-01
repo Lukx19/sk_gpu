@@ -36,10 +36,11 @@ struct engine {
 	xr_settings_t xr_functions;
 
 	bool swapchain_created;
+	bool graphics_ready;
 #ifdef XR
-	app_swapchain_t swapchain;
+        app_swapchain_t swapchain;
 #else
-	skg_swapchain_t swapchain;
+        skg_swapchain_t swapchain;
 #endif
 	int animating;
 	struct saved_state state;
@@ -305,10 +306,24 @@ static void engine_handle_cmd(struct android_app* app, int32_t cmd) {
 		LOGI("cmd: init");
 		// The window is being shown, get it ready.
 		if (engine->app->window != NULL) {
-			if (engine_init_display(engine))
-				engine_draw_frame(engine);
-			else
-				app->destroyRequested = 1;
+			if (!engine->graphics_ready) {
+				int result = skg_init("skg_gpu.h", engine->app->window, nullptr);
+				if (!result) {
+					app->destroyRequested = 1;
+					return;
+                                }
+				if (!app_init()) {
+					app->destroyRequested = 1;
+					return;
+                                }
+				engine->graphics_ready = true;
+                        }
+			if (engine->graphics_ready) {
+				if (engine_init_display(engine))
+					engine_draw_frame(engine);
+				else
+					app->destroyRequested = 1;
+                        }
 		}
 		break;
 	case APP_CMD_TERM_WINDOW:  LOGI("cmd: term"); engine_term_display(engine); break;
@@ -335,11 +350,8 @@ void android_main(struct android_app* state) {
 		engine.state = *(struct saved_state*)state->savedState;
 	}
 
-	skg_callback_file_read(android_fopen);
-	skg_callback_log      (android_log_callback);
-	int result = skg_init("skg_gpu.h", nullptr);
-	if (!result) return;
-	if (!app_init()) return;
+        skg_callback_file_read(android_fopen);
+        skg_callback_log      (android_log_callback);
 
 	engine.animating = 1;
 	bool run = true;
@@ -357,10 +369,11 @@ void android_main(struct android_app* state) {
 		}
 	}
 
-	engine_term_display(&engine);
-
-	app_shutdown();
-	skg_shutdown();
+	if (engine.graphics_ready) {
+		engine_term_display(&engine);
+		app_shutdown();
+		skg_shutdown();
+        }
 }
 
 ///////////////////////////////////////////

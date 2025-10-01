@@ -882,7 +882,8 @@ void gl_check_exts() {
 
 ///////////////////////////////////////////
 
-int32_t skg_init(const char *app_name, void *adapter_id) {
+int32_t skg_init(const char *app_name, void *app_hwnd, void *adapter_id) {
+        (void)app_hwnd;
 #if   defined(_SKG_GL_LOAD_WGL)
 	int32_t result = gl_init_wgl();
 #elif defined(_SKG_GL_LOAD_EGL)
